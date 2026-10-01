@@ -124,7 +124,9 @@ static void JointMotorInit()
 static void GimbalApplyCmd()
 {
     ArmMpcTaskSetMode(&arm_mpc, gimbal_cmd_recv.mode == ARM_RUN ? ARM_MPC_MODE_RUN : ARM_MPC_MODE_ZERO_FORCE);
-    ArmMpcTaskSetTarget(&arm_mpc, (ArmMpcMove)gimbal_cmd_recv.move, gimbal_cmd_recv.q_target, gimbal_cmd_recv.move_time);
+    float q_target[ARM_JOINT_NUM]; 
+    memcpy(q_target, gimbal_cmd_recv.q_target, sizeof(q_target));
+    ArmMpcTaskSetTarget(&arm_mpc, (ArmMpcMove)gimbal_cmd_recv.move, q_target, gimbal_cmd_recv.move_time);
 }
 
 static void GimbalSetFeedback()

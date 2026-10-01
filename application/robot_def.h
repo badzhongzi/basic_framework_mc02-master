@@ -177,10 +177,10 @@ typedef struct
  */
 typedef struct
 {
-    arm_mode_e mode;               // 每帧都要给. ZERO_FORCE->RUN 的切换同时是故障确认(清除锁存故障)
-    arm_move_e move;               // 走向目标角的方式
     float q_target[ARM_JOINT_NUM]; // 关节目标角, rad
     float move_time;               // 运动时长, s, 只在 TIMED 下用
+    arm_mode_e mode;               // 每帧都要给. ZERO_FORCE->RUN 的切换同时是故障确认(清除锁存故障)
+    arm_move_e move;               // 走向目标角的方式
 } Gimbal_Ctrl_Cmd_s;
 
 // cmd发布的发射控制数据,由shoot订阅
