@@ -2,6 +2,7 @@
 #include "robot.h"
 #include "robot_def.h"
 #include "robot_task.h"
+#include "dmmotor.h"
 
 // 编译warning,提醒开发者修改机器人参数
 #ifndef ROBOT_DEF_PARAM_WARNING
@@ -40,6 +41,8 @@ void RobotInit()
 #endif
 
     OSTaskInit(); // 创建基础任务
+
+    DMMotorControlInit(); // 达妙电机任务创建
 
     // 初始化完成,开启中断
     __enable_irq();

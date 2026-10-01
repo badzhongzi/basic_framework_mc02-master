@@ -146,7 +146,42 @@ application/chassis/chassis.c \
 application/shoot/shoot.c \
 application/cmd/robot_cmd.c \
 application/robot.c \
-Core/Src/i2c.c
+Core/Src/i2c.c \
+Engineer_Components_master/src/ec_math.c \
+Engineer_Components_master/src/ec_matrix.c \
+Engineer_Components_master/src/ec_operation.c \
+Engineer_Components_master/src/ec_transform.c \
+Engineer_Components_master/src/ec_link.c \
+Engineer_Components_master/src/ec_planner.c \
+Engineer_Components_master/src/ec_traj.c \
+Engineer_Components_master/src/ec_ikine.c \
+Engineer_Components_master/src/ec_arm.c \
+application/gimbal/Instance/Src/ins_arm.c \
+application/gimbal/Instance/Src/ins_planner.c \
+application/gimbal/Instance/Src/ins_traj.c \
+application/gimbal/Instance/Src/arm_mpc_task.c \
+application/gimbal/Instance/Generated/mpc_6axis.c \
+application/gimbal/Instance/Generated/rnea_6axis.c \
+application/gimbal/Instance/Generated/generated_solver/common/src/algebra_libs.c \
+application/gimbal/Instance/Generated/generated_solver/common/src/auxil.c \
+application/gimbal/Instance/Generated/generated_solver/common/src/csc_math.c \
+application/gimbal/Instance/Generated/generated_solver/common/src/csc_utils.c \
+application/gimbal/Instance/Generated/generated_solver/common/src/error.c \
+application/gimbal/Instance/Generated/generated_solver/common/src/kkt.c \
+application/gimbal/Instance/Generated/generated_solver/common/src/matrix.c \
+application/gimbal/Instance/Generated/generated_solver/common/src/osqp_api.c \
+application/gimbal/Instance/Generated/generated_solver/common/src/qdldl.c \
+application/gimbal/Instance/Generated/generated_solver/common/src/qdldl_interface.c \
+application/gimbal/Instance/Generated/generated_solver/common/src/scaling.c \
+application/gimbal/Instance/Generated/generated_solver/common/src/util.c \
+application/gimbal/Instance/Generated/generated_solver/common/src/vector.c \
+application/gimbal/Instance/Generated/generated_solver/joint0/mpc_j0workspace.c \
+application/gimbal/Instance/Generated/generated_solver/joint1/mpc_j1workspace.c \
+application/gimbal/Instance/Generated/generated_solver/joint2/mpc_j2workspace.c \
+application/gimbal/Instance/Generated/generated_solver/joint3/mpc_j3workspace.c \
+application/gimbal/Instance/Generated/generated_solver/joint4/mpc_j4workspace.c \
+application/gimbal/Instance/Generated/generated_solver/joint5/mpc_j5workspace.c \
+modules/fly/flysky.c
 
 # ASM sources
 ASM_SOURCES =  \
@@ -260,7 +295,14 @@ C_INCLUDES =  \
 -IMiddlewares/ST/ARM/DSP/Inc \
 -IMiddlewares/ST/ARM/DSP/Include/dsp \
 -IMiddlewares/Third_Party/SEGGER/RTT \
--IMiddlewares/Third_Party/SEGGER/Config
+-IMiddlewares/Third_Party/SEGGER/Config \
+-IEngineer_Components_master/include \
+-Iapplication/gimbal/Instance/Inc \
+-Iapplication/gimbal/Instance/Generated \
+-Iapplication/gimbal/Instance/Generated/generated_solver/common \
+-Iapplication/gimbal/Instance/Generated/generated_solver/common/inc/public \
+-Iapplication/gimbal/Instance/Generated/generated_solver/common/inc/private \
+-Imodules/fly
 
 
 

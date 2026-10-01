@@ -1,154 +1,165 @@
 #include "gimbal.h"
 #include "robot_def.h"
-#include "dji_motor.h"
-#include "ins_task.h"
 #include "message_center.h"
-#include "general_def.h"
-#include "bmi088.h"
+#include "dmmotor.h"
+#include "arm_mpc_task.h"
+#include "bsp_log.h"
+#include <string.h>
 
-static attitude_t *gimba_IMU_data; // 云台IMU数据
-static DJIMotorInstance *yaw_motor, *pitch_motor;
+_Static_assert(ARM_JOINT_NUM == ARM_MPC_JOINT_COUNT, "robot_def.h ARM_JOINT_NUM mismatch");
+_Static_assert((int)ARM_MOVE_FOLLOW == (int)ARM_MPC_MOVE_FOLLOW && (int)ARM_MOVE_TIMED == (int)ARM_MPC_MOVE_TIMED,
+               "robot_def.h arm_move_e mismatch");
+_Static_assert(sizeof(Gimbal_Ctrl_Cmd_s) <= 255, "message_center data_len is uint8_t");
+_Static_assert(sizeof(Gimbal_Upload_Data_s) <= 255, "message_center data_len is uint8_t");
 
-static Publisher_t *gimbal_pub;                   // 云台应用消息发布者(云台反馈给cmd)
+/*
+ * 关节电机CAN配置, 实物到了之后只改这张表.
+ * tx_id 填电机的CAN_ID, rx_id 填电机的MST_ID(反馈帧ID), 在达妙上位机里查看/设置.
+ *
+ * 目前全部是占位值. tx_id 为 ARM_JOINT_ID_PLACEHOLDER 的关节不会注册电机,
+ * 按"理想跟踪"参与计算(反馈取参考值): 同一条总线上 rx_id 重复注册会让
+ * CANRegister() 死循环, 占位值全部相同, 所以不能直接注册.
+ *
+ * 负载: 每个电机 500Hz 收发各一帧, 6个电机挤在一条1Mbps总线上约占78%,
+ * 实物接线时建议分到两条总线上.
+ * MC02上底盘占用CAN1(hcan1), 发射占用CAN2(hcan2), 机械臂默认放在CAN3(hcan3).
+ */
+#define ARM_JOINT_ID_PLACEHOLDER 0x00
+
+typedef struct
+{
+#ifdef FDCAN
+    FDCAN_HandleTypeDef *can_handle;
+#else
+    CAN_HandleTypeDef *can_handle;
+#endif
+    uint32_t tx_id;
+    uint32_t rx_id;
+    Motor_Type_e motor_type;
+} Arm_Joint_Motor_Config_s;
+
+static const Arm_Joint_Motor_Config_s joint_motor_config[ARM_JOINT_NUM] = {
+    {&hcan3, ARM_JOINT_ID_PLACEHOLDER, ARM_JOINT_ID_PLACEHOLDER, DM6248P}, // J0
+    {&hcan3, ARM_JOINT_ID_PLACEHOLDER, ARM_JOINT_ID_PLACEHOLDER, DM4340P}, // J1
+    {&hcan3, ARM_JOINT_ID_PLACEHOLDER, ARM_JOINT_ID_PLACEHOLDER, DM4340P}, // J2
+    {&hcan3, ARM_JOINT_ID_PLACEHOLDER, ARM_JOINT_ID_PLACEHOLDER, DM4310},  // J3
+    {&hcan3, ARM_JOINT_ID_PLACEHOLDER, ARM_JOINT_ID_PLACEHOLDER, DM4310},  // J4
+    {&hcan3, ARM_JOINT_ID_PLACEHOLDER, ARM_JOINT_ID_PLACEHOLDER, DM4310},  // J5
+};
+
+/*
+ * 关节换算参数, 全部是占位值, 上板前逐项标定:
+ *   direction  电机正方向与MDH关节正方向相同为1, 相反为-1
+ *   q_offset   电机零位(达妙上位机设置的零点)对应的MDH关节角, rad
+ *   tau_max    关节总力矩上限, N·m. 首次上电取额定扭矩以下, 调好后再放开;
+ *              超过电机MIT映射范围T_MAX的部分会在初始化时被截掉
+ * 额定/峰值: DM6248P 30/97, DM4340P 12/40, DM4310 3.5/12.5 (N·m)
+ */
+static const ArmMpcJointConfig joint_cfg[ARM_JOINT_NUM] = {
+    {.direction = 1.0f, .q_offset = 0.0f, .tau_max = 20.0f}, // J0 DM6248P
+    {.direction = 1.0f, .q_offset = 0.0f, .tau_max = 8.0f},  // J1 DM4340P
+    {.direction = 1.0f, .q_offset = 0.0f, .tau_max = 8.0f},  // J2 DM4340P
+    {.direction = 1.0f, .q_offset = 0.0f, .tau_max = 3.0f},  // J3 DM4310
+    {.direction = 1.0f, .q_offset = 0.0f, .tau_max = 3.0f},  // J4 DM4310
+    {.direction = 1.0f, .q_offset = 0.0f, .tau_max = 3.0f},  // J5 DM4310
+};
+
+static DMMotorInstance *joint_motor[ARM_JOINT_NUM]; // 关节电机, 未注册的为NULL
+static ArmMpcTask arm_mpc;                          // 机械臂控制实例
+
+static Publisher_t *gimbal_pub;                   // 机械臂状态发布者(反馈给cmd)
 static Subscriber_t *gimbal_sub;                  // cmd控制消息订阅者
-static Gimbal_Upload_Data_s gimbal_feedback_data; // 回传给cmd的云台状态信息
+static Gimbal_Upload_Data_s gimbal_feedback_data; // 回传给cmd的机械臂状态
 static Gimbal_Ctrl_Cmd_s gimbal_cmd_recv;         // 来自cmd的控制信息
 
-static BMI088Instance *bmi088; // 云台IMU
-void GimbalInit()
-{   
-    gimba_IMU_data = INS_Init(); // IMU先初始化,获取姿态数据指针赋给yaw电机的其他数据来源
-    // YAW
-    Motor_Init_Config_s yaw_config = {
-        .can_init_config = {
-            .can_handle = &hcan3,
-            .tx_id = 1,
-        },
-        .controller_param_init_config = {
-            .angle_PID = {
-                .Kp = 8, // 8
-                .Ki = 0,
-                .Kd = 0,
-                .DeadBand = 0.1,
-                .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
-                .IntegralLimit = 100,
+/* 检查同一总线上是否已有相同rx_id的电机, 重复注册会让CANRegister()死循环 */
+static uint8_t JointCanIdConflict(uint8_t joint)
+{
+    for (uint8_t i = 0; i < joint; i++)
+    {
+        if (joint_motor[i] &&
+            joint_motor_config[i].can_handle == joint_motor_config[joint].can_handle &&
+            joint_motor_config[i].rx_id == joint_motor_config[joint].rx_id)
+            return 1;
+    }
+    return 0;
+}
 
-                .MaxOut = 500,
+static void JointMotorInit()
+{
+    for (uint8_t j = 0; j < ARM_JOINT_NUM; j++)
+    {
+        const Arm_Joint_Motor_Config_s *c = &joint_motor_config[j];
+        if (c->tx_id == ARM_JOINT_ID_PLACEHOLDER)
+        {
+            LOGWARNING("[gimbal] joint [%d] CAN id not configured, motor not registered", j);
+            continue;
+        }
+        if (JointCanIdConflict(j))
+        {
+            LOGERROR("[gimbal] joint [%d] rx id [%d] already used on this bus, motor not registered", j, c->rx_id);
+            continue;
+        }
+        // 力控: 力矩直接由 ArmMpcTask 给出, 不用驱动里的PID
+        // 方向统一在 joint_cfg 里处理, 电机的正反转标志保持 NORMAL
+        Motor_Init_Config_s config = {
+            .can_init_config = {
+                .can_handle = c->can_handle,
+                .tx_id = c->tx_id,
+                .rx_id = c->rx_id,
             },
-            .speed_PID = {
-                .Kp = 50,  // 50
-                .Ki = 200, // 200
-                .Kd = 0,
-                .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
-                .IntegralLimit = 3000,
-                .MaxOut = 20000,
+            .controller_setting_init_config = {
+                .outer_loop_type = OPEN_LOOP,
+                .close_loop_type = OPEN_LOOP,
+                .motor_reverse_flag = MOTOR_DIRECTION_NORMAL,
+                .feedback_reverse_flag = FEEDBACK_DIRECTION_NORMAL,
             },
-            .other_angle_feedback_ptr = &gimba_IMU_data->YawTotalAngle,
-            // 还需要增加角速度额外反馈指针,注意方向,ins_task.md中有c板的bodyframe坐标系说明
-            .other_speed_feedback_ptr = &gimba_IMU_data->Gyro[2],
-        },
-        .controller_setting_init_config = {
-            .angle_feedback_source = OTHER_FEED,
-            .speed_feedback_source = OTHER_FEED,
-            .outer_loop_type = ANGLE_LOOP,
-            .close_loop_type = ANGLE_LOOP | SPEED_LOOP,
-            .motor_reverse_flag = MOTOR_DIRECTION_NORMAL,
-        },
-        .motor_type = GM6020};
-    // PITCH
-    Motor_Init_Config_s pitch_config = {
-        .can_init_config = {
-            .can_handle = &hcan3,
-            .tx_id = 2,
-        },
-        .controller_param_init_config = {
-            .angle_PID = {
-                .Kp = 10, // 10
-                .Ki = 0,
-                .Kd = 0,
-                .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
-                .IntegralLimit = 100,
-                .MaxOut = 500,
-            },
-            .speed_PID = {
-                .Kp = 50,  // 50
-                .Ki = 350, // 350
-                .Kd = 0,   // 0
-                .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
-                .IntegralLimit = 2500,
-                .MaxOut = 20000,
-            },
-            .other_angle_feedback_ptr = &gimba_IMU_data->Pitch,
-            // 还需要增加角速度额外反馈指针,注意方向,ins_task.md中有c板的bodyframe坐标系说明
-            .other_speed_feedback_ptr = (&gimba_IMU_data->Gyro[0]),
-        },
-        .controller_setting_init_config = {
-            .angle_feedback_source = OTHER_FEED,
-            .speed_feedback_source = OTHER_FEED,
-            .outer_loop_type = ANGLE_LOOP,
-            .close_loop_type = SPEED_LOOP | ANGLE_LOOP,
-            .motor_reverse_flag = MOTOR_DIRECTION_NORMAL,
-        },
-        .motor_type = GM6020,
-    };
-    // 电机对total_angle闭环,上电时为零,会保持静止,收到遥控器数据再动
-    yaw_motor = DJIMotorInit(&yaw_config);
-    pitch_motor = DJIMotorInit(&pitch_config);
+            .motor_type = c->motor_type,
+        };
+        joint_motor[j] = DMMotorInit(&config);
+    }
+}
+
+/* 把cmd消息转交给ArmMpcTask. 没收到新消息时模式和目标都保持上一帧 */
+static void GimbalApplyCmd()
+{
+    ArmMpcTaskSetMode(&arm_mpc, gimbal_cmd_recv.mode == ARM_RUN ? ARM_MPC_MODE_RUN : ARM_MPC_MODE_ZERO_FORCE);
+    ArmMpcTaskSetTarget(&arm_mpc, (ArmMpcMove)gimbal_cmd_recv.move, gimbal_cmd_recv.q_target, gimbal_cmd_recv.move_time);
+}
+
+static void GimbalSetFeedback()
+{
+    memcpy(gimbal_feedback_data.q, arm_mpc.q_actual, sizeof(gimbal_feedback_data.q));
+    memcpy(gimbal_feedback_data.q_target, arm_mpc.q_target, sizeof(gimbal_feedback_data.q_target));
+    gimbal_feedback_data.arrived = arm_mpc.arrived;
+    gimbal_feedback_data.limp = arm_mpc.limp;
+    gimbal_feedback_data.fault_flags = arm_mpc.fault_flags;
+    gimbal_feedback_data.motor_online = arm_mpc.motor_online;
+}
+
+void GimbalInit()
+{
+    JointMotorInit();
+
+    // 初始化后处于零力矩, cmd给出 ARM_RUN 后才会出力
+    if (!ArmMpcTaskInit(&arm_mpc, joint_motor, joint_cfg))
+        LOGERROR("[gimbal] ArmMpcTask init failed, check joint_cfg");
 
     gimbal_pub = PubRegister("gimbal_feed", sizeof(Gimbal_Upload_Data_s));
     gimbal_sub = SubRegister("gimbal_cmd", sizeof(Gimbal_Ctrl_Cmd_s));
 }
 
-/* 机器人云台控制核心任务,后续考虑只保留IMU控制,不再需要电机的反馈 */
+/* 机械臂控制核心任务, 与RobotTask同频(INS_ARM_CONTROL_TICK_MS) */
 void GimbalTask()
 {
-    // 获取云台控制数据
-    // 后续增加未收到数据的处理
-    SubGetMessage(gimbal_sub, &gimbal_cmd_recv);
+    // 获取机械臂控制数据
+    if (SubGetMessage(gimbal_sub, &gimbal_cmd_recv))
+        GimbalApplyCmd();
 
-    // @todo:现在已不再需要电机反馈,实际上可以始终使用IMU的姿态数据来作为云台的反馈,yaw电机的offset只是用来跟随底盘
-    // 根据控制模式进行电机反馈切换和过渡,视觉模式在robot_cmd模块就已经设置好,gimbal只看yaw_ref和pitch_ref
-    switch (gimbal_cmd_recv.gimbal_mode)
-    {
-    // 停止
-    case GIMBAL_ZERO_FORCE:
-        DJIMotorStop(yaw_motor);
-        DJIMotorStop(pitch_motor);
-        break;
-    // 使用陀螺仪的反馈,底盘根据yaw电机的offset跟随云台或视觉模式采用
-    case GIMBAL_GYRO_MODE: // 后续只保留此模式
-        DJIMotorEnable(yaw_motor);
-        DJIMotorEnable(pitch_motor);
-        DJIMotorChangeFeed(yaw_motor, ANGLE_LOOP, OTHER_FEED);
-        DJIMotorChangeFeed(yaw_motor, SPEED_LOOP, OTHER_FEED);
-        DJIMotorChangeFeed(pitch_motor, ANGLE_LOOP, OTHER_FEED);
-        DJIMotorChangeFeed(pitch_motor, SPEED_LOOP, OTHER_FEED);
-        DJIMotorSetRef(yaw_motor, gimbal_cmd_recv.yaw); // yaw和pitch会在robot_cmd中处理好多圈和单圈
-        DJIMotorSetRef(pitch_motor, gimbal_cmd_recv.pitch);
-        break;
-    // 云台自由模式,使用编码器反馈,底盘和云台分离,仅云台旋转,一般用于调整云台姿态(英雄吊射等)/能量机关
-    case GIMBAL_FREE_MODE: // 后续删除,或加入云台追地盘的跟随模式(响应速度更快)
-        DJIMotorEnable(yaw_motor);
-        DJIMotorEnable(pitch_motor);
-        DJIMotorChangeFeed(yaw_motor, ANGLE_LOOP, OTHER_FEED);
-        DJIMotorChangeFeed(yaw_motor, SPEED_LOOP, OTHER_FEED);
-        DJIMotorChangeFeed(pitch_motor, ANGLE_LOOP, OTHER_FEED);
-        DJIMotorChangeFeed(pitch_motor, SPEED_LOOP, OTHER_FEED);
-        DJIMotorSetRef(yaw_motor, gimbal_cmd_recv.yaw); // yaw和pitch会在robot_cmd中处理好多圈和单圈
-        DJIMotorSetRef(pitch_motor, gimbal_cmd_recv.pitch);
-        break;
-    default:
-        break;
-    }
+    // 反馈 -> 故障检测 -> 目标角 -> 轨迹 -> RNEA+MPC -> 电机力矩
+    ArmMpcTaskRun(&arm_mpc);
 
-    // 在合适的地方添加pitch重力补偿前馈力矩
-    // 根据IMU姿态/pitch电机角度反馈计算出当前配重下的重力矩
-    // ...
-
-    // 设置反馈数据,主要是imu和yaw的ecd
-    gimbal_feedback_data.gimbal_imu_data = *gimba_IMU_data;
-    gimbal_feedback_data.yaw_motor_single_round_angle = yaw_motor->measure.angle_single_round;
-
-    // 推送消息
+    // 设置反馈数据并推送
+    GimbalSetFeedback();
     PubPushMessage(gimbal_pub, (void *)&gimbal_feedback_data);
 }

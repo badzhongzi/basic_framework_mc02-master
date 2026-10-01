@@ -138,18 +138,41 @@ SECTIONS
   _sidata = LOADADDR(.data);
 
   /* Initialized data sections goes into RAM, load LMA copy after code */
-  .data : 
+  .data :
   {
     . = ALIGN(4);
     _sdata = .;        /* create a global symbol at data start */
-    *(.data)           /* .data sections */
-    *(.data*)          /* .data* sections */
+    /* MPC joint0..5 workspaces go to DTCMRAM, see .dtcm below */
+    EXCLUDE_FILE(*mpc_j[0-5]workspace.o) *(.data)
+    EXCLUDE_FILE(*mpc_j[0-5]workspace.o) *(.data*)
 
     . = ALIGN(4);
     _edata = .;        /* define a global symbol at data end */
   } >RAM AT> FLASH
 
-  
+  _sidtcm = LOADADDR(.dtcm);
+
+  /* DTCM-RAM section
+  *
+  * Reset_Handler copies the whole section from _sidtcm, so .bss placed
+  * here is zero-filled by that copy (costs flash, not RAM).
+  * DTCM is only reachable by the CPU and MDMA: never put DMA/BDMA buffers here.
+  * OSQP workspaces of the 6 MPC joints (~12 KB each, ~72 KB in total) live
+  * here so they do not eat the 128 KB AXI SRAM that DMA buffers and the heap use.
+  */
+  .dtcm :
+  {
+    . = ALIGN(4);
+    _sdtcm = .;         /* create a global symbol at dtcm start */
+    *(.dtcm)
+    *(.dtcm*)
+    *mpc_j[0-5]workspace.o(.data .data* .bss .bss* COMMON)
+
+    . = ALIGN(4);
+    _edtcm = .;         /* create a global symbol at dtcm end */
+  } >DTCMRAM AT> FLASH
+
+
   /* Uninitialized data section */
   . = ALIGN(4);
   .bss :
@@ -157,9 +180,9 @@ SECTIONS
     /* This is used by the startup in order to initialize the .bss secion */
     _sbss = .;         /* define a global symbol at bss start */
     __bss_start__ = _sbss;
-    *(.bss)
-    *(.bss*)
-    *(COMMON)
+    EXCLUDE_FILE(*mpc_j[0-5]workspace.o) *(.bss)
+    EXCLUDE_FILE(*mpc_j[0-5]workspace.o) *(.bss*)
+    EXCLUDE_FILE(*mpc_j[0-5]workspace.o) *(COMMON)
 
     . = ALIGN(4);
     _ebss = .;         /* define a global symbol at bss end */

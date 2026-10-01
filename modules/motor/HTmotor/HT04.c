@@ -151,6 +151,7 @@ __attribute__((noreturn)) void HTMotorTask(void const *argument)
     Motor_Control_Setting_s *setting = &motor->motor_settings;
     CANInstance *motor_can = motor->motor_can_instace;
     uint16_t tmp;
+    uint32_t wake_time = osKernelSysTick();
 
     while (1)
     {
@@ -198,7 +199,7 @@ __attribute__((noreturn)) void HTMotorTask(void const *argument)
 
         CANTransmit(motor_can, 0.5);
 
-        osDelay(1);
+        osDelayUntil(&wake_time, 1);
     }
 }
 

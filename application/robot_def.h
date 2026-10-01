@@ -94,7 +94,22 @@ typedef enum
     GIMBAL_ZERO_FORCE = 0, // 电流零输入
     GIMBAL_FREE_MODE,      // 云台自由运动模式,即与底盘分离(底盘此时应为NO_FOLLOW)反馈值为电机total_angle;似乎可以改为全部用IMU数据?
     GIMBAL_GYRO_MODE,      // 云台陀螺仪反馈模式,反馈值为陀螺仪pitch,total_yaw_angle,底盘可以为小陀螺和跟随模式
-} gimbal_mode_e;
+} gimbal_mode_e; // 旧云台模式, 裁判系统UI仍在使用, 机械臂不再使用
+
+/* 机械臂(gimbal应用)相关定义 */
+#define ARM_JOINT_NUM 6 // 关节数
+
+typedef enum
+{
+    ARM_ZERO_FORCE = 0, // 电机不出力, 目标角自动跟随实际角; 切到这里同时是故障确认
+    ARM_RUN,            // 走向目标角
+} arm_mode_e;
+
+typedef enum
+{
+    ARM_MOVE_FOLLOW = 0, // 跟随: 目标每帧可变, 固定100ms平滑(遥控器)
+    ARM_MOVE_TIMED,      // 定时: 目标变化时按move_time走过去(点位/自动流程)
+} arm_move_e;
 
 // 发射模式设置
 typedef enum
@@ -149,14 +164,23 @@ typedef struct
 
 } Chassis_Ctrl_Cmd_s;
 
-// cmd发布的云台控制数据,由gimbal订阅
+/*
+ * cmd发布的机械臂(gimbal应用)控制数据,由gimbal订阅
+ *
+ * 只有一种输入: 关节目标角. 各种遥控器/自动流程都在cmd层换算成目标角:
+ *   增量式遥控器  把增量累加到目标角上, FOLLOW
+ *   绝对式遥控器  直接给目标角, FOLLOW
+ *   自动流程      一步一个点位, TIMED, 等反馈里 arrived=1 再走下一步
+ * 超出关节限位的目标会被夹到限位上, 实际生效的目标见反馈里的 q_target.
+ * 零力矩期间给的目标不起作用, 目标角跟随实际角.
+ * 多种遥控器同时在线时的优先级仲裁在cmd层完成.
+ */
 typedef struct
-{ // 云台角度控制
-    float yaw;
-    float pitch;
-    float chassis_rotate_wz;
-
-    gimbal_mode_e gimbal_mode;
+{
+    arm_mode_e mode;               // 每帧都要给. ZERO_FORCE->RUN 的切换同时是故障确认(清除锁存故障)
+    arm_move_e move;               // 走向目标角的方式
+    float q_target[ARM_JOINT_NUM]; // 关节目标角, rad
+    float move_time;               // 运动时长, s, 只在 TIMED 下用
 } Gimbal_Ctrl_Cmd_s;
 
 // cmd发布的发射控制数据,由shoot订阅
@@ -194,10 +218,15 @@ typedef struct
 } Chassis_Upload_Data_s;
 
 
+// gimbal回传的机械臂状态
 typedef struct
 {
-    attitude_t gimbal_imu_data;
-    uint16_t yaw_motor_single_round_angle;
+    float q[ARM_JOINT_NUM];        // 关节角反馈, rad (未接的关节为参考值)
+    float q_target[ARM_JOINT_NUM]; // 实际生效的目标角(已夹进限位), rad; 零力矩下等于q
+    uint8_t arrived;               // 1: 已停在目标角
+    uint8_t limp;                  // 1: 当前处于零力矩输出(零力矩模式或有故障)
+    uint8_t fault_flags;           // 锁存故障, 见 arm_mpc_task.h 的 ARM_MPC_FAULT_*, 切到ZERO_FORCE清除
+    uint8_t motor_online;          // 按位, 第j位为1表示关节j的电机在线且已使能
 } Gimbal_Upload_Data_s;
 
 typedef struct

@@ -106,6 +106,9 @@ typedef enum
     M2006,
     LK9025,
     HT04,
+    DM6248P,
+    DM4340P,
+    DM4310,
 } Motor_Type_e;
 
 /**
