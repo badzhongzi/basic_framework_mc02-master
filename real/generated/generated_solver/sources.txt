@@ -1,0 +1,16 @@
+# Run these paths from the generated/ directory:
+# Compile the common OSQP sources exactly once:
+generated_solver/common/src/*.c
+# Compile one workspace source for each joint:
+generated_solver/joint0/mpc_j0workspace.c
+generated_solver/joint1/mpc_j1workspace.c
+generated_solver/joint2/mpc_j2workspace.c
+generated_solver/joint3/mpc_j3workspace.c
+generated_solver/joint4/mpc_j4workspace.c
+generated_solver/joint5/mpc_j5workspace.c
+# Include directories:
+-I .
+-I generated_solver/common
+-I generated_solver/common/inc/public
+-I generated_solver/common/inc/private
+# Also compile generated/mpc_6axis.c and generated/rnea_6axis.c
