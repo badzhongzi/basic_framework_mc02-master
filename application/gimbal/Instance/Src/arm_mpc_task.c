@@ -416,7 +416,9 @@ bool ArmMpcTaskInit(ArmMpcTask *self,
   /* 此时还没有电机反馈, 先停在零位并立即进入零力矩; 真正的保持点在第一次
    * 离开零力矩时取实际反馈角 (见 leave_limp)。 */
   const float q_init[ARM_MPC_JOINT_COUNT] = {0};
-  const float dq_max[ARM_MPC_JOINT_COUNT] = {2.0f, 2.0f, 2.0f, 2.0f, 2.0f, 2.0f};
+  /* 速度上限 = URDF 的 velocity (3 rad/s), 和 MPC 速度约束的上限 MPC_V_HI 一致;
+   * 加速度上限 URDF 没给, 是估的。 */
+  const float dq_max[ARM_MPC_JOINT_COUNT] = {3.0f, 3.0f, 3.0f, 3.0f, 3.0f, 3.0f};
   const float ddq_max[ARM_MPC_JOINT_COUNT] = {20.0f, 20.0f, 20.0f,
                                               20.0f, 20.0f, 20.0f};
   uint8_t j;

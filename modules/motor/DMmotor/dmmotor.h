@@ -11,7 +11,7 @@
 /*
  * MIT协议的映射范围(对称,±MAX),必须和达妙上位机里给电机设置的PMAX/VMAX/TMAX一致,
  * 否则收发的位置/速度/力矩会按比例错位,而且不会有任何报错.
- * 6248P/4340P/4310P 是上位机里实际设置的值; 4310 没有给定, 沿用原来的占位值, 上板前用上位机核对.
+ * 以下都是上位机里实际设置的值. 4310 和 4310P 除了名字没有区别, 参数相同.
  * 单位: 位置rad,速度rad/s,力矩N·m,均为减速器输出端
  */
 #define DM6248P_P_MAX 12.566f
@@ -26,9 +26,9 @@
 #define DM4310P_V_MAX 30.0f
 #define DM4310P_T_MAX 12.5f
 
-#define DM4310_P_MAX 12.5f
-#define DM4310_V_MAX 30.0f
-#define DM4310_T_MAX 10.0f
+#define DM4310_P_MAX DM4310P_P_MAX
+#define DM4310_V_MAX DM4310P_V_MAX
+#define DM4310_T_MAX DM4310P_T_MAX
 
 // 未指定型号时使用的映射范围(沿用原来的默认值)
 #define DM_P_MIN  (-12.5f)

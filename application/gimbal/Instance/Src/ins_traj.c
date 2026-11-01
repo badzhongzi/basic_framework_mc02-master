@@ -23,12 +23,13 @@
 #define INS_TRAJ_MAX_SEG_TIME 5.0f
 
 /*
- * 默认速度/加速度上限。dq 取 openarm.urdf 里 revolute 关节的 velocity 限值;
+ * 默认速度/加速度上限。dq 取 URDF (D:/rm/urdf_urdf/urdf.urdf) 里 revolute 关节的
+ * velocity 限值, 六个关节都是 3 rad/s, 和 MPC 生成代码里速度约束的上限一致;
  * ddq 的 URDF 没给, 这个数是估的——真实值要么实测, 要么由力矩上限和惯量反推。
- * 上限偏小只会让动作变慢, 偏大则会让参考轨迹跑到执行机构跟不上的地方,
- * 所以先给保守值, 标定后用 ins_traj_set_velocity_limit() 覆盖。
+ * 上限偏小只会让动作变慢, 偏大则会让参考轨迹跑到执行机构跟不上的地方。
+ * ArmMpcTaskInit() 会用 ins_traj_set_velocity_limit() 覆盖成实际用的值。
  */
-#define INS_TRAJ_DEFAULT_DQ_MAX 1.0f
+#define INS_TRAJ_DEFAULT_DQ_MAX 3.0f
 #define INS_TRAJ_DEFAULT_DDQ_MAX 10.0f
 
 static bool traj_finite_array(const float *v, uint8_t count) {

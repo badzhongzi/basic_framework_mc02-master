@@ -56,18 +56,19 @@ static const Arm_Joint_Motor_Config_s joint_motor_config[ARM_JOINT_NUM] = {
  * 关节换算参数, 上板前逐项标定:
  *   direction  电机正方向与MDH关节正方向相同为1, 相反为-1 (还没标定, 全是1)
  *   q_offset   电机零位(达妙上位机设置的零点)对应的MDH关节角, rad (负责人给定的值, 上板后核对)
- *   tau_max    关节总力矩上限, N·m. 首次上电取额定扭矩以下, 调好后再放开, 但不要超过
- *              生成代码里的 MPC_EFFORT_MAX(URDF effort 28/48/48/12.5/28/12.5):
- *              求解器按 effort 留余量, 这里截得更狠时观测器会把差值当扰动.
+ *   tau_max    关节总力矩上限, N·m. 取电机能出的最大力矩 = 上位机 TMAX = URDF effort,
+ *              和生成代码里求解器的总力矩约束 MPC_EFFORT_MAX 一致.
+ *              注意: direction 还没标定, 方向配反时跟踪保护要 200 ms 才动作,
+ *              这段时间电机可能顶在这个值上, 第一次上电要有人看护.
  *              超过电机MIT映射范围T_MAX的部分会在初始化时被截掉
  */
 static const ArmMpcJointConfig joint_cfg[ARM_JOINT_NUM] = {
-    {.direction = 1.0f, .q_offset = -3.14f, .tau_max = 8.0f},  // J0 DM4340P
-    {.direction = 1.0f, .q_offset = 1.57f,  .tau_max = 20.0f}, // J1 DM6248P
-    {.direction = 1.0f, .q_offset = -3.08f, .tau_max = 20.0f}, // J2 DM6248P
-    {.direction = 1.0f, .q_offset = -1.57f, .tau_max = 3.0f},  // J3 DM4310P
-    {.direction = 1.0f, .q_offset = 0.0f,   .tau_max = 8.0f},  // J4 DM4340P
-    {.direction = 1.0f, .q_offset = 0.0f,   .tau_max = 3.0f},  // J5 DM4310
+    {.direction = 1.0f, .q_offset = -3.14f, .tau_max = 28.0f}, // J0 DM4340P
+    {.direction = 1.0f, .q_offset = 1.57f,  .tau_max = 48.0f}, // J1 DM6248P
+    {.direction = 1.0f, .q_offset = -3.08f, .tau_max = 48.0f}, // J2 DM6248P
+    {.direction = 1.0f, .q_offset = -1.57f, .tau_max = 12.5f}, // J3 DM4310P
+    {.direction = 1.0f, .q_offset = 0.0f,   .tau_max = 28.0f}, // J4 DM4340P
+    {.direction = 1.0f, .q_offset = 0.0f,   .tau_max = 12.5f}, // J5 DM4310
 };
 
 static DMMotorInstance *joint_motor[ARM_JOINT_NUM]; // 关节电机, 未注册的为NULL
