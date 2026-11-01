@@ -77,5 +77,18 @@
             "svdFile": "${workspaceFolder}/STM32H723.svd",
             "rtos": "FreeRTOS",
         },
+        {
+            "name": "Orbit Debug (J-Link)",
+            "type": "orbit",
+            "request": "launch",
+            "device": "STM32H723VG"
+        },
+        {
+            "name": "Orbit Debug (DAPLink)",
+            "type": "orbit",
+            "request": "launch",
+            "device": "STM32H723VG",
+            "probe": "cmsis-dap"
+        }
     ],
 }
