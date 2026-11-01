@@ -1,5 +1,11 @@
 {
-    "cortex-debug.openocdPath": "D:\\MSYS64\\MINGW64\\BIN\\OPENOCD.EXE",
-    "cortex-debug.armToolchainPath": "D:\\MSYS64\\MINGW64\\BIN",
-    "C_Cpp.errorSquiggles": "disabled"
+    "cortex-debug.openocdPath": "D:\\stm32tools\\openocd\\0.12.0-7.1\\.content\\bin\\openocd.exe",
+    "cortex-debug.armToolchainPath": "D:\\stm32tools\\arm-none-eabi-gcc\\14.2.1-1.1.1\\.content\\bin",
+    "C_Cpp.errorSquiggles": "disabled",
+    "cortex-debug.variableUseNaturalFormat": true,
+    "memory-view.trackDebuggers": [
+        "ozone",
+        "orbit"
+    ],
+    "orbit.defaultProgram": "d:\\basic_framework_mc02-master\\basic_framework_mc02-master\\build\\Basic_Framework_MC02.elf"
 }

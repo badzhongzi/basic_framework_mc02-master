@@ -1,0 +1,81 @@
+{
+    // 启动调试的快捷键是F5
+    "version": "0.2.0",
+    "configurations": [
+        // 使用dap-link(如无线调试器时的参考配置)
+        {
+            "name": "DAPlink",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build/Basic_Framework_MC02.elf", // Makefile TARGET=Basic_Framework_MC02
+            "request": "launch",
+            "type": "cortex-debug",
+            //使用J-link GDB Server时必须;其他GBD Server时可选（有可能帮助自动选择SVD文件）
+            //支持的设备见 https://www.segger.com/downloads/supported-devices.php
+            "device": "STM32H723VG",
+            //svd文件，有这个文件才能查看寄存器的值，每个单片机都不同。可以在以下地址找到 https://github.com/posborne/cmsis-svd
+            //达妙MC02使用的STM32H723VG，svd已放在工程目录
+            "svdFile": "${workspaceFolder}/STM32H723.svd",
+            "servertype": "openocd", //使用的GDB Server
+            "configFiles": [
+                "openocd_dap.cfg", // 达妙MC02 OpenOCD配置,芯片为stm32h7x
+            ],
+            "runToEntryPoint": "main", // 调试时在main函数入口停下
+            "rtos": "FreeRTOS",
+            "preLaunchTask": "build task",//先运行Build任务编译项目,取消注释即可使用
+            "liveWatch": {
+                "enabled": true,
+                "samplesPerSecond": 4
+            }
+            // dap若要使用log,请使用Jlink调试任务启动,之后再打开log任务
+            // 若想要在调试前编译并且打开log,可只使用log的prelaunch task并为log任务添加depends on依赖
+        },
+        // 使用j-link进行调试时的参考配置
+        {
+            "name": "Jlink",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build/Basic_Framework_MC02.elf",
+            "request": "launch",
+            "type": "cortex-debug",
+            "device": "STM32H723VG",
+            "runToEntryPoint": "main",
+            "showDevDebugOutput": "none",
+            "servertype": "jlink",
+            "interface": "swd",
+            "svdFile": "${workspaceFolder}/STM32H723.svd",
+            "rtos": "FreeRTOS",
+            "preLaunchTask": "build task",//先运行Build任务,取消注释即可使用
+            "liveWatch": {
+                "enabled": true,
+                "samplesPerSecond": 4
+            }
+            //"preLaunchTask": "log", // 调试时同时开启RTT viewer窗口,若daplink使用jlinkGDBserver启动,需要先开始调试再打开log
+            // 若想要在调试前编译并且打开log,可只使用log的prelaunch task并为log任务添加depends on依赖
+        },
+        {
+            "name": "DAP-attach",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build/Basic_Framework_MC02.elf",
+            "request": "attach",
+            "type": "cortex-debug",
+            "device": "STM32H723VG",
+            "svdFile": "${workspaceFolder}/STM32H723.svd",
+            "servertype": "openocd",
+            "configFiles": [
+                "openocd_dap.cfg",
+            ],
+        },
+        {
+            "name": "Jlink-attach",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build/Basic_Framework_MC02.elf",
+            "request": "attach",
+            "type": "cortex-debug",
+            "device": "STM32H723VG",
+            "showDevDebugOutput": "none",
+            "servertype": "jlink",
+            "interface": "swd",
+            "svdFile": "${workspaceFolder}/STM32H723.svd",
+            "rtos": "FreeRTOS",
+        },
+    ],
+}
