@@ -1,0 +1,265 @@
+"use strict";
+const crypto = require("crypto");
+const fs = require("fs/promises");
+const { execFile } = require("child_process");
+const { decodeOutput } = require("./tool-output");
+const { resolveOpenOcdLaunch } = require("./openocd-launch");
+const { listProbes } = require("./probe-inventory");
+const { resolveProbeConnection, connectionError, probeFamily } = require("./probe-connection");
+const { requireJlinkWinUsb } = require("./jlink-driver");
+const { createProbeProfile, captureProfileScript, PRINT_PROFILE, parseProfileEvents } = require("./probe-profile");
+
+const capabilitiesCache = new Map();
+// Interface profiles and transports, by OpenOCD build and exact interface-script text. Every operation resolves
+// them before connecting, and each costs an OpenOCD start, so only self-contained scripts are cached: a script
+// that loads other files or reads the environment can change without its own text changing.
+const scriptCache = new Map();
+const maxScriptCache = 16;
+const LOADS_OTHER_INPUT = /\b(?:source|find|script|add_script_search_dir|exec|open|glob|file|env)\b/;
+
+function scriptCacheKey(executableKey, launch, script) {
+    const code = String(script)
+        .split(/\r?\n/)
+        .filter((line) => !/^\s*#/.test(line))
+        .join("\n");
+    if (LOADS_OTHER_INPUT.test(code)) return "";
+    const digest = crypto.createHash("sha256").update(String(script)).digest("hex");
+    return JSON.stringify([executableKey, launch.scriptsRoot, launch.probePath, digest]);
+}
+
+function cached(cache, key, field, compute) {
+    const entry = cache && key ? cache.get(key) : undefined;
+    if (entry && field in entry) return Promise.resolve(entry[field]);
+    return compute().then((value) => {
+        // An unresolved result is reported, not remembered.
+        if (cache && key && value != null) {
+            if (!cache.has(key) && cache.size >= maxScriptCache) cache.clear();
+            cache.set(key, { ...cache.get(key), [field]: value });
+        }
+        return value;
+    });
+}
+
+function query(executable, args, cwd = undefined) {
+    return new Promise((resolve, reject) =>
+        execFile(
+            executable,
+            args,
+            { timeout: 5000, maxBuffer: 256 * 1024, windowsHide: true, cwd, encoding: "buffer" },
+            (error, stdout, stderr) => {
+                if (!error) return resolve(`${decodeOutput(stdout)}\n${decodeOutput(stderr)}`);
+                // Node quotes stderr in the message as UTF-8; quote the decoded text instead.
+                const detail = decodeOutput(stderr).trim();
+                error.message = [error.message.split("\n")[0], detail].filter(Boolean).join("\n");
+                reject(error);
+            }
+        )
+    );
+}
+
+function parseAdapterList(output) {
+    const marker = String(output).match(/^EP_ADAPTERS_BEGIN\s*([\s\S]*?)^EP_ADAPTERS_END\s*$/m);
+    if (!marker) return null;
+    const body = marker[1].trim();
+    if (!body) return [];
+    // OpenOCD 0.12.0 prints a heading followed by numbered adapter names.
+    if (body.startsWith("The following debug adapters are available:")) {
+        const lines = body
+            .split(/\r?\n/)
+            .slice(1)
+            .filter((line) => line.trim());
+        if (!lines.every((line) => /^\s*\d+:\s+[\w-]+\s*$/.test(line))) return null;
+        return lines.map((line) => line.trim().split(/\s+/)[1]);
+    }
+    if (body.includes("{")) return [...body.matchAll(/([\w-]+)\s*\{[^}]*\}/g)].map((match) => match[1]);
+    return /^[\w\s-]+$/.test(body) ? body.split(/\s+/) : null;
+}
+
+async function checkAdapterCapability(launch, options = {}) {
+    const readFile = options.readFile || fs.readFile;
+    const run = options.run || query;
+    const stat = await (options.stat || fs.stat)(launch.executable);
+    const key = `${launch.executable}:${stat.mtimeMs}:${stat.size}`;
+    let drivers = capabilitiesCache.get(key);
+    if (!drivers) {
+        let output;
+        try {
+            output = await run(launch.executable, [
+                "-c",
+                "noinit",
+                "-c",
+                "echo EP_ADAPTERS_BEGIN",
+                "-c",
+                "adapter list",
+                "-c",
+                "echo EP_ADAPTERS_END",
+                "-c",
+                "shutdown"
+            ]);
+        } catch (cause) {
+            throw connectionError(
+                "PROBE_CAPABILITY_UNKNOWN",
+                "Unable to inspect OpenOCD adapter capabilities without initialization",
+                { cause: cause.message }
+            );
+        }
+        drivers = parseAdapterList(output);
+        if (!drivers)
+            throw connectionError("PROBE_CAPABILITY_UNKNOWN", "OpenOCD returned an unrecognized adapter list");
+        if (!options.run) {
+            if (capabilitiesCache.size >= 8) capabilitiesCache.clear();
+            capabilitiesCache.set(key, drivers);
+        }
+    }
+    const script = await readFile(launch.probePath, "utf8");
+    const direct = String(script).match(/^\s*adapter\s+driver\s+([\w-]+)\s*(?:#.*)?$/m);
+    let adapterFamily = direct?.[1];
+    if (adapterFamily && !drivers.includes(adapterFamily))
+        throw connectionError(
+            "PROBE_DRIVER_MISSING",
+            `This OpenOCD build does not include the ${adapterFamily} adapter`,
+            { adapterFamily, drivers }
+        );
+    // Injected runners are not cached unless the caller supplies its own cache.
+    const cache = options.cache !== undefined ? options.cache : options.run ? null : scriptCache;
+    const cacheKey = cache ? scriptCacheKey(key, launch, script) : "";
+    let profile;
+    try {
+        const resolved = await cached(cache, cacheKey, "profile", async () => {
+            // Custom trusted interface scripts can source another script. Do not load a target or call init.
+            const output = await run(
+                launch.executable,
+                [
+                    "-s",
+                    launch.scriptsRoot,
+                    "-c",
+                    "noinit",
+                    "-c",
+                    captureProfileScript(),
+                    "-f",
+                    launch.probePath,
+                    "-c",
+                    "echo EP_ADAPTER_NAME=[adapter name]",
+                    "-c",
+                    PRINT_PROFILE,
+                    "-c",
+                    "shutdown"
+                ],
+                launch.scriptsRoot
+            );
+            const name = String(output).match(/^EP_ADAPTER_NAME=([\w-]+)\s*$/m)?.[1];
+            return name ? { adapterFamily: name, events: parseProfileEvents(output) } : null;
+        });
+        adapterFamily = resolved?.adapterFamily;
+        if (resolved)
+            profile = createProbeProfile(
+                resolved.adapterFamily,
+                resolved.events.map((event) => [...event]),
+                launch.probePath
+            );
+    } catch (cause) {
+        if (typeof cause.code === "string" && cause.code.startsWith("PROBE_")) throw cause;
+        throw connectionError(
+            "PROBE_CAPABILITY_UNKNOWN",
+            "Unable to resolve the interface adapter without initialization",
+            { cause: cause.message }
+        );
+    }
+    if (!adapterFamily)
+        throw connectionError("PROBE_CAPABILITY_UNKNOWN", "Cannot determine the selected interface adapter");
+    if (!drivers.includes(adapterFamily))
+        throw connectionError(
+            "PROBE_DRIVER_MISSING",
+            `This OpenOCD build does not include the ${adapterFamily} adapter`,
+            { adapterFamily, drivers }
+        );
+    return { adapterFamily, drivers, profile, cache, cacheKey };
+}
+
+async function prepareProbeConnection(options, dependencies = {}) {
+    const launch = (dependencies.resolveLaunch || resolveOpenOcdLaunch)(
+        options.executable || options.openocd,
+        options.probe,
+        options.target,
+        options.transport
+    );
+    const capability = await (dependencies.checkCapability || checkAdapterCapability)(launch);
+    const profile = capability.profile || createProbeProfile(capability.adapterFamily, [], options.probe);
+    const family = probeFamily({ ...options, profile });
+    const inventory =
+        family && profile.kind === "usb"
+            ? await (dependencies.listProbes || listProbes)({
+                  family,
+                  ...(profile.vidPid.length ? { vidPid: profile.vidPid } : {})
+              })
+            : { available: false, devices: [], notes: [] };
+    const connection = resolveProbeConnection(
+        { ...options, profile, adapterFamily: capability.adapterFamily },
+        inventory
+    );
+    if (capability.adapterFamily === "jlink")
+        requireJlinkWinUsb(
+            { ...connection, adapterFamily: capability.adapterFamily, inventory },
+            dependencies.platform || process.platform,
+            dependencies.arch || process.arch
+        );
+    if (capability.adapterFamily === "jlink")
+        connection.transport = await (dependencies.resolveTransport || resolveInterfaceTransport)(
+            launch,
+            connection.transport,
+            undefined,
+            capability.cache,
+            capability.cacheKey
+        );
+    return {
+        ...connection,
+        openocd: launch.executable,
+        adapterFamily: capability.adapterFamily,
+        profile,
+        launch,
+        inventory
+    };
+}
+
+// The capability check supplies the cache and key; a script it would not cache is queried every time.
+async function resolveInterfaceTransport(launch, transport, run = query, cache = null, cacheKey = "") {
+    if (!["auto", "swd", "jtag"].includes(transport))
+        throw connectionError("OPENOCD_TRANSPORT_INVALID", "J-Link requires an SWD or JTAG transport");
+    return cached(cache, cacheKey, `transport:${transport}`, async () => {
+        let output;
+        try {
+            output = await run(
+                launch.executable,
+                [
+                    "-s",
+                    launch.scriptsRoot,
+                    "-c",
+                    "noinit",
+                    "-f",
+                    launch.probePath,
+                    ...(transport === "auto" ? [] : ["-c", `transport select ${transport}`]),
+                    "-c",
+                    "echo EP_TRANSPORT=[transport select]",
+                    "-c",
+                    "shutdown"
+                ],
+                launch.scriptsRoot
+            );
+        } catch (cause) {
+            throw connectionError(
+                "OPENOCD_TRANSPORT_INVALID",
+                "The interface script cannot select the requested transport",
+                { transport, cause: cause.message }
+            );
+        }
+        const selected = String(output).match(/^EP_TRANSPORT=(swd|jtag)\s*$/m)?.[1];
+        if (!selected || (transport !== "auto" && selected !== transport))
+            throw connectionError(
+                "PROBE_CAPABILITY_UNKNOWN",
+                "Cannot confirm the interface transport without initialization"
+            );
+        return selected;
+    });
+}
+
+module.exports = { prepareProbeConnection, checkAdapterCapability, parseAdapterList, resolveInterfaceTransport };

@@ -1,0 +1,4 @@
+interface:
+  display_name: "MCU Peripheral Debug"
+  short_description: "Inspect and safely modify SVD peripheral registers"
+  default_prompt: "Use $mcu-peripheral-debug to inspect the configured SVD and debug the requested peripheral registers safely."

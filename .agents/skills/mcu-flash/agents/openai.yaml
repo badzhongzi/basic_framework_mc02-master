@@ -1,0 +1,4 @@
+interface:
+  display_name: "MCU Flash"
+  short_description: "Program or verify MCU firmware safely"
+  default_prompt: "Use $mcu-flash to program the workspace firmware or verify the existing on-chip Flash as requested."
