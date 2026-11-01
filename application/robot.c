@@ -10,13 +10,10 @@
 #pragma message "check if you have configured the parameters in robot_def.h, IF NOT, please refer to the comments AND DO IT, otherwise the robot will have FATAL ERRORS!!!"
 #endif // !ROBOT_DEF_PARAM_WARNING
 
-#if defined(ONE_BOARD) || defined(CHASSIS_BOARD)
-#include "chassis.h"
-#endif
-
+// 这块板只管机械臂, 不管底盘和发射: chassis / shoot 应用不再初始化和运行,
+// 源文件仍在 Makefile 里编译, 以后需要时恢复这里的调用即可.
 #if defined(ONE_BOARD) || defined(GIMBAL_BOARD)
 #include "gimbal.h"
-#include "shoot.h"
 #include "robot_cmd.h"
 #endif
 
@@ -33,11 +30,6 @@ void RobotInit()
 #if defined(ONE_BOARD) || defined(GIMBAL_BOARD)
     RobotCMDInit();
     GimbalInit();
-    ShootInit();
-#endif
-
-#if defined(ONE_BOARD) || defined(CHASSIS_BOARD)
-    ChassisInit();
 #endif
 
     OSTaskInit(); // 创建基础任务
@@ -53,11 +45,6 @@ void RobotTask()
 #if defined(ONE_BOARD) || defined(GIMBAL_BOARD)
     RobotCMDTask();
     GimbalTask();
-    ShootTask();
-#endif
-
-#if defined(ONE_BOARD) || defined(CHASSIS_BOARD)
-    ChassisTask();
 #endif
 
 }

@@ -20,9 +20,14 @@ _Static_assert(sizeof(Gimbal_Upload_Data_s) <= 255, "message_center data_len is 
  * 按"理想跟踪"参与计算(反馈取参考值): 同一条总线上 rx_id 重复注册会让
  * CANRegister() 死循环, 占位值全部相同, 所以不能直接注册.
  *
- * 负载: 每个电机 500Hz 收发各一帧, 6个电机挤在一条1Mbps总线上约占78%,
- * 实物接线时建议分到两条总线上.
- * MC02上底盘占用CAN1(hcan1), 发射占用CAN2(hcan2), 机械臂默认放在CAN3(hcan3).
+ * 负载: 每个电机 500Hz 收发各一帧, 6个电机挤在一条1Mbps总线上约占67%~81%,
+ * 所以分到两条总线上: J0-J2 在 FDCAN1(hcan1), J3-J5 在 FDCAN2(hcan2), 每条约 33%~41%.
+ * 这块板不再管底盘和发射, FDCAN1/2 上只有机械臂; FDCAN3 空着.
+ *
+ * ID 规划(在上位机里设好以后再填, 见说明文档 4.2):
+ *   - 本板发送的 CAN_ID 要比同一总线上所有反馈 MST_ID 小: FDCAN 配成了不自动重发,
+ *     仲裁输掉的帧会直接丢掉. 建议 CAN_ID 0x01-0x06, MST_ID 0x11-0x16.
+ *   - 反馈进哪个接收 FIFO 按 tx_id 的奇偶分, 同一总线上奇偶交替才能分到两个 FIFO.
  */
 #define ARM_JOINT_ID_PLACEHOLDER 0x00
 
@@ -39,29 +44,30 @@ typedef struct
 } Arm_Joint_Motor_Config_s;
 
 static const Arm_Joint_Motor_Config_s joint_motor_config[ARM_JOINT_NUM] = {
-    {&hcan3, ARM_JOINT_ID_PLACEHOLDER, ARM_JOINT_ID_PLACEHOLDER, DM6248P}, // J0
-    {&hcan3, ARM_JOINT_ID_PLACEHOLDER, ARM_JOINT_ID_PLACEHOLDER, DM4340P}, // J1
-    {&hcan3, ARM_JOINT_ID_PLACEHOLDER, ARM_JOINT_ID_PLACEHOLDER, DM4340P}, // J2
-    {&hcan3, ARM_JOINT_ID_PLACEHOLDER, ARM_JOINT_ID_PLACEHOLDER, DM4310},  // J3
-    {&hcan3, ARM_JOINT_ID_PLACEHOLDER, ARM_JOINT_ID_PLACEHOLDER, DM4310},  // J4
-    {&hcan3, ARM_JOINT_ID_PLACEHOLDER, ARM_JOINT_ID_PLACEHOLDER, DM4310},  // J5
+    {&hcan1, ARM_JOINT_ID_PLACEHOLDER, ARM_JOINT_ID_PLACEHOLDER, DM4340P}, // J0
+    {&hcan1, ARM_JOINT_ID_PLACEHOLDER, ARM_JOINT_ID_PLACEHOLDER, DM6248P}, // J1
+    {&hcan1, ARM_JOINT_ID_PLACEHOLDER, ARM_JOINT_ID_PLACEHOLDER, DM6248P}, // J2
+    {&hcan2, ARM_JOINT_ID_PLACEHOLDER, ARM_JOINT_ID_PLACEHOLDER, DM4310P}, // J3
+    {&hcan2, ARM_JOINT_ID_PLACEHOLDER, ARM_JOINT_ID_PLACEHOLDER, DM4340P}, // J4
+    {&hcan2, ARM_JOINT_ID_PLACEHOLDER, ARM_JOINT_ID_PLACEHOLDER, DM4310},  // J5
 };
 
 /*
- * 关节换算参数, 全部是占位值, 上板前逐项标定:
- *   direction  电机正方向与MDH关节正方向相同为1, 相反为-1
- *   q_offset   电机零位(达妙上位机设置的零点)对应的MDH关节角, rad
- *   tau_max    关节总力矩上限, N·m. 首次上电取额定扭矩以下, 调好后再放开;
+ * 关节换算参数, 上板前逐项标定:
+ *   direction  电机正方向与MDH关节正方向相同为1, 相反为-1 (还没标定, 全是1)
+ *   q_offset   电机零位(达妙上位机设置的零点)对应的MDH关节角, rad (负责人给定的值, 上板后核对)
+ *   tau_max    关节总力矩上限, N·m. 首次上电取额定扭矩以下, 调好后再放开, 但不要超过
+ *              生成代码里的 MPC_EFFORT_MAX(URDF effort 28/48/48/12.5/28/12.5):
+ *              求解器按 effort 留余量, 这里截得更狠时观测器会把差值当扰动.
  *              超过电机MIT映射范围T_MAX的部分会在初始化时被截掉
- * 额定/峰值: DM6248P 30/97, DM4340P 12/40, DM4310 3.5/12.5 (N·m)
  */
 static const ArmMpcJointConfig joint_cfg[ARM_JOINT_NUM] = {
-    {.direction = 1.0f, .q_offset = 0.0f, .tau_max = 20.0f}, // J0 DM6248P
-    {.direction = 1.0f, .q_offset = 0.0f, .tau_max = 8.0f},  // J1 DM4340P
-    {.direction = 1.0f, .q_offset = 0.0f, .tau_max = 8.0f},  // J2 DM4340P
-    {.direction = 1.0f, .q_offset = 0.0f, .tau_max = 3.0f},  // J3 DM4310
-    {.direction = 1.0f, .q_offset = 0.0f, .tau_max = 3.0f},  // J4 DM4310
-    {.direction = 1.0f, .q_offset = 0.0f, .tau_max = 3.0f},  // J5 DM4310
+    {.direction = 1.0f, .q_offset = -3.14f, .tau_max = 8.0f},  // J0 DM4340P
+    {.direction = 1.0f, .q_offset = 1.57f,  .tau_max = 20.0f}, // J1 DM6248P
+    {.direction = 1.0f, .q_offset = -3.08f, .tau_max = 20.0f}, // J2 DM6248P
+    {.direction = 1.0f, .q_offset = -1.57f, .tau_max = 3.0f},  // J3 DM4310P
+    {.direction = 1.0f, .q_offset = 0.0f,   .tau_max = 8.0f},  // J4 DM4340P
+    {.direction = 1.0f, .q_offset = 0.0f,   .tau_max = 3.0f},  // J5 DM4310
 };
 
 static DMMotorInstance *joint_motor[ARM_JOINT_NUM]; // 关节电机, 未注册的为NULL

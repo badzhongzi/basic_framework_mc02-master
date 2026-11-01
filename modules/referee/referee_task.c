@@ -61,7 +61,8 @@ static uint32_t shoot_line_location[10] = {540, 960, 490, 515, 565};
 
 void MyUIInit()
 {
-    if (!referee_recv_info->init_flag)
+    // 裁判系统是在 ChassisInit() 里初始化的; 不管底盘时 UITaskInit() 没被调用, referee_recv_info 是 NULL
+    if (referee_recv_info == NULL || !referee_recv_info->init_flag)
         vTaskDelete(NULL); // 如果没有初始化裁判系统则直接删除ui任务
     while (referee_recv_info->GameRobotState.robot_id == 0)
         osDelay(100); // 若还未收到裁判系统数据,等待一段时间后再检查

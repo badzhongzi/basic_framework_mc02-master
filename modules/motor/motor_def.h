@@ -109,6 +109,7 @@ typedef enum
     DM6248P,
     DM4340P,
     DM4310,
+    DM4310P,
 } Motor_Type_e;
 
 /**

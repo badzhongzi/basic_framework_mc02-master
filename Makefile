@@ -162,25 +162,7 @@ application/gimbal/Instance/Src/ins_traj.c \
 application/gimbal/Instance/Src/arm_mpc_task.c \
 application/gimbal/Instance/Generated/mpc_6axis.c \
 application/gimbal/Instance/Generated/rnea_6axis.c \
-application/gimbal/Instance/Generated/generated_solver/common/src/algebra_libs.c \
-application/gimbal/Instance/Generated/generated_solver/common/src/auxil.c \
-application/gimbal/Instance/Generated/generated_solver/common/src/csc_math.c \
-application/gimbal/Instance/Generated/generated_solver/common/src/csc_utils.c \
-application/gimbal/Instance/Generated/generated_solver/common/src/error.c \
-application/gimbal/Instance/Generated/generated_solver/common/src/kkt.c \
-application/gimbal/Instance/Generated/generated_solver/common/src/matrix.c \
-application/gimbal/Instance/Generated/generated_solver/common/src/osqp_api.c \
-application/gimbal/Instance/Generated/generated_solver/common/src/qdldl.c \
-application/gimbal/Instance/Generated/generated_solver/common/src/qdldl_interface.c \
-application/gimbal/Instance/Generated/generated_solver/common/src/scaling.c \
-application/gimbal/Instance/Generated/generated_solver/common/src/util.c \
-application/gimbal/Instance/Generated/generated_solver/common/src/vector.c \
-application/gimbal/Instance/Generated/generated_solver/joint0/mpc_j0workspace.c \
-application/gimbal/Instance/Generated/generated_solver/joint1/mpc_j1workspace.c \
-application/gimbal/Instance/Generated/generated_solver/joint2/mpc_j2workspace.c \
-application/gimbal/Instance/Generated/generated_solver/joint3/mpc_j3workspace.c \
-application/gimbal/Instance/Generated/generated_solver/joint4/mpc_j4workspace.c \
-application/gimbal/Instance/Generated/generated_solver/joint5/mpc_j5workspace.c \
+application/gimbal/Instance/Generated/crba_6axis.c \
 modules/fly/flysky.c
 
 # ASM sources
@@ -299,9 +281,6 @@ C_INCLUDES =  \
 -IEngineer_Components_master/include \
 -Iapplication/gimbal/Instance/Inc \
 -Iapplication/gimbal/Instance/Generated \
--Iapplication/gimbal/Instance/Generated/generated_solver/common \
--Iapplication/gimbal/Instance/Generated/generated_solver/common/inc/public \
--Iapplication/gimbal/Instance/Generated/generated_solver/common/inc/private \
 -Imodules/fly
 
 

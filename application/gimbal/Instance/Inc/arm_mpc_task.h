@@ -73,12 +73,14 @@ typedef struct {
     float dq_actual[ARM_MPC_JOINT_COUNT];             /* 关节角速度反馈, rad/s */
     EC_JointStateReference ref;                       /* 本周期参考点 */
 
-    float tau_ff[ARM_MPC_JOINT_COUNT];                /* RNEA 前馈力矩, Nm */
-    float mpc_dtau[ARM_MPC_JOINT_COUNT];              /* MPC 修正力矩, Nm (未轮到的关节 hold) */
-    float tau_total[ARM_MPC_JOINT_COUNT];             /* 饱和后的最终力矩, Nm */
+    float tau_ff[ARM_MPC_JOINT_COUNT];                /* 前馈力矩 (RNEA + 摩擦补偿), Nm */
+    float mpc_dtau[ARM_MPC_JOINT_COUNT];              /* MPC 修正力矩 (按 effort 饱和之后), Nm */
+    float tau_total[ARM_MPC_JOINT_COUNT];             /* 按 tau_max 饱和后的最终力矩, Nm */
+    float rho[ARM_MPC_JOINT_COUNT];                   /* 惯量比 M_eff(q)/M_design, dtau = rho * u */
+    float w_hat[ARM_MPC_JOINT_COUNT];                 /* 观测器的扰动估计 (前推到力矩生效时刻), rad/s^2;
+                                                         静止时就是前馈没补上的那部分, 看模型准不准用它 */
 
     uint32_t tick;                                    /* 当前 tick (osKernelSysTick) */
-    uint8_t mpc_joint_index;                          /* 错峰: 下一个要解的关节 */
 
     /* 目标输入, 由 ArmMpcTaskSetTarget() 写入, 一直保持到下一次写入 */
     float q_target[ARM_MPC_JOINT_COUNT];              /* 已夹进关节限位, rad; 零力矩下等于实际角 */
@@ -97,12 +99,11 @@ typedef struct {
     bool limp;                                        /* 当前是否处于零力矩输出 */
     uint16_t track_err_ticks;                         /* 跟踪误差连续超限的周期数 */
 
-    /* 诊断计数, 只增不减, 调试时加到 watch 里看。 */
-    uint32_t mpc_fail_count;                          /* update/solve 调用失败 (沿用旧 dtau) */
-    uint32_t mpc_unconverged_count;                   /* 未收敛但按仿真约定采用了迭代点 */
-    uint32_t saturate_count;                          /* 总力矩被限幅 */
-    uint32_t cycles_last;                             /* 本周期 RNEA+MPC 的 CPU 周期数 */
-    uint32_t cycles_max;                              /* 历史最大值, 用来核对 F4 的实时预算 */
+    /* 诊断计数, 只增不减, 调试时加到 watch 里看。
+     * 求解器是定迭代次数的, 没有 "失败 / 未收敛" 这一说, 旧版的那两个计数去掉了。 */
+    uint32_t saturate_count;                          /* 总力矩被 tau_max 限幅 */
+    uint32_t cycles_last;                             /* 本周期第 4 步 (前馈+观测器+MPC) 的 CPU 周期数 */
+    uint32_t cycles_max;                              /* 历史最大值, 2 ms = 960000 个周期 (480 MHz) */
 
     bool initialized;
 } ArmMpcTask;

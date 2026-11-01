@@ -101,8 +101,9 @@ SECTIONS
   .rodata :
   {
     . = ALIGN(4);
-    *(.rodata)         /* .rodata sections (constants, strings, etc.) */
-    *(.rodata*)        /* .rodata* sections (constants, strings, etc.) */
+    /* MPC solver tables (mpc_6axis.o) go to DTCMRAM, see .dtcm below */
+    EXCLUDE_FILE(*mpc_6axis.o) *(.rodata)         /* .rodata sections (constants, strings, etc.) */
+    EXCLUDE_FILE(*mpc_6axis.o) *(.rodata*)        /* .rodata* sections (constants, strings, etc.) */
     . = ALIGN(4);
   } >FLASH
 
@@ -142,9 +143,9 @@ SECTIONS
   {
     . = ALIGN(4);
     _sdata = .;        /* create a global symbol at data start */
-    /* MPC joint0..5 workspaces go to DTCMRAM, see .dtcm below */
-    EXCLUDE_FILE(*mpc_j[0-5]workspace.o) *(.data)
-    EXCLUDE_FILE(*mpc_j[0-5]workspace.o) *(.data*)
+    /* MPC solver state (mpc_6axis.o) goes to DTCMRAM, see .dtcm below */
+    EXCLUDE_FILE(*mpc_6axis.o) *(.data)
+    EXCLUDE_FILE(*mpc_6axis.o) *(.data*)
 
     . = ALIGN(4);
     _edata = .;        /* define a global symbol at data end */
@@ -157,8 +158,10 @@ SECTIONS
   * Reset_Handler copies the whole section from _sidtcm, so .bss placed
   * here is zero-filled by that copy (costs flash, not RAM).
   * DTCM is only reachable by the CPU and MDMA: never put DMA/BDMA buffers here.
-  * OSQP workspaces of the 6 MPC joints (~12 KB each, ~72 KB in total) live
-  * here so they do not eat the 128 KB AXI SRAM that DMA buffers and the heap use.
+  * The MPC solver (mpc_6axis.o: ~11 KB constant tables + ~2 KB warm-start and
+  * observer state) lives here: it is the hottest data of the control loop and
+  * DTCM is zero-wait and does not depend on the (currently disabled) D-Cache.
+  * The tables are copied from flash at reset like .data.
   */
   .dtcm :
   {
@@ -166,7 +169,8 @@ SECTIONS
     _sdtcm = .;         /* create a global symbol at dtcm start */
     *(.dtcm)
     *(.dtcm*)
-    *mpc_j[0-5]workspace.o(.data .data* .bss .bss* COMMON)
+    *mpc_6axis.o(.rodata .rodata* .data .data*)
+    *mpc_6axis.o(.bss .bss* COMMON)
 
     . = ALIGN(4);
     _edtcm = .;         /* create a global symbol at dtcm end */
@@ -180,9 +184,9 @@ SECTIONS
     /* This is used by the startup in order to initialize the .bss secion */
     _sbss = .;         /* define a global symbol at bss start */
     __bss_start__ = _sbss;
-    EXCLUDE_FILE(*mpc_j[0-5]workspace.o) *(.bss)
-    EXCLUDE_FILE(*mpc_j[0-5]workspace.o) *(.bss*)
-    EXCLUDE_FILE(*mpc_j[0-5]workspace.o) *(COMMON)
+    EXCLUDE_FILE(*mpc_6axis.o) *(.bss)
+    EXCLUDE_FILE(*mpc_6axis.o) *(.bss*)
+    EXCLUDE_FILE(*mpc_6axis.o) *(COMMON)
 
     . = ALIGN(4);
     _ebss = .;         /* define a global symbol at bss end */

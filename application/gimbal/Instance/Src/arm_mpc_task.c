@@ -26,9 +26,12 @@
 #define ARM_MPC_TRACK_ERR_MAX 0.35f /* rad, 约 20 deg */
 #define ARM_MPC_TRACK_ERR_TICKS (200u / INS_ARM_CONTROL_TICK_MS) /* 200 ms */
 
-/* OSQP 状态码: 1 = solved, 2 = solved inaccurate。 */
-#define ARM_MPC_OSQP_SOLVED            1
-#define ARM_MPC_OSQP_SOLVED_INACCURATE 2
+/*
+ * MPC 的一拍 = 一个控制周期 = INS_ARM_CONTROL_TICK_MS 个 tick (轨迹计划的 tick
+ * 就是 osKernelSysTick, 1 ms)。生成代码里的 MPC_BASE_DT 必须等于控制周期,
+ * 在 ArmMpcTaskInit() 里检查 (浮点比较不能写成静态断言)。
+ */
+#define ARM_MPC_TICKS_PER_STEP INS_ARM_CONTROL_TICK_MS
 
 /* 达妙反馈状态 >= 8 为电机报错, 见 DMMotor_State_e。 */
 #define ARM_MPC_DM_ERR_MIN DM_ERR_OVER_VOLTAGE
@@ -161,89 +164,153 @@ static bool target_arrived(const ArmMpcTask *self) {
          ins_traj_status(&self->traj) == (uint8_t)EC_TRAJ_HOLD;
 }
 
-/* ---------- RNEA 前馈 ---------- */
+/* ---------- 前馈 ---------- */
 
-/* 前馈用实际 q/dq + 参考 ddq: 前馈要抵消的是真实动力学, 而 ddq 是
- * "希望关节产生的加速度"。传参考 q/dq 进去就变成纯开环前馈。 */
-static void compute_rnea_feedforward(ArmMpcTask *self) {
+/*
+ * 前馈 = RNEA(实际 q, 实际 dq, 力矩生效时刻的参考 ddq) + 摩擦补偿(实际 dq)。
+ * 前馈要抵消的是真实动力学, 而 ddq 是"希望关节产生的加速度"; 传参考 q/dq
+ * 进去就变成纯开环前馈。摩擦补偿必须用生成代码里的 mpc_friction_ff(), 它和
+ * 求解器里总力矩约束用的 tau_ff 是同一个东西。
+ */
+static void compute_feedforward(ArmMpcTask *self, const float *ddq_ref) {
   const casadi_real *arg[rnea_SZ_ARG] = {self->q_actual, self->dq_actual,
-                                         self->ref.q_ddot};
+                                         ddq_ref};
   casadi_real *res[rnea_SZ_RES] = {self->tau_ff};
+  float fric[ARM_MPC_JOINT_COUNT];
+  uint8_t j;
 
   /* rnea_SZ_IW = rnea_SZ_W = 0, 不需要工作内存。 */
   (void)rnea(arg, res, NULL, NULL, 0);
+  mpc_friction_ff(self->dq_actual, fric);
+  for (j = 0; j < ARM_MPC_JOINT_COUNT; ++j) self->tau_ff[j] += fric[j];
 }
 
-/* ---------- MPC 错峰求解 ---------- */
+/* 参考前馈 tref = RNEA(参考 q, dq, ddq) + 摩擦补偿(参考 dq), 只用来预测
+ * 时域末尾的前馈 (总力矩约束沿时域变化)。 */
+static void reference_torque(const EC_JointStateReference *r,
+                             float out[ARM_MPC_JOINT_COUNT]) {
+  const casadi_real *arg[rnea_SZ_ARG] = {r->q, r->q_dot, r->q_ddot};
+  casadi_real *res[rnea_SZ_RES] = {out};
+  float fric[ARM_MPC_JOINT_COUNT];
+  uint8_t j;
 
-/*
- * delta_seq[k] = x_ref(t0) - x_ref(t0 + k * MPC_DT), k = 0..N。
- * t0 就是本周期的 tick, 和 self->ref 是同一个时刻, 所以 delta[0] 恒为 0,
- * 直接写 0 而不是求值后相减, 省一次求值也避免浮点上的非零残差。
- */
-static void build_delta_seq(const EC_TrajPlan *plan, uint32_t tick,
-                            uint8_t joint, float q0, float dq0,
-                            float delta_seq[MPC_N + 1][2]) {
-  const float t0 = (float)(int32_t)(tick - plan->t0_tick) * plan->tick_period;
-  int k;
-
-  delta_seq[0][0] = 0.0f;
-  delta_seq[0][1] = 0.0f;
-  for (k = 1; k <= MPC_N; ++k) {
-    float qk = q0;
-    float dqk = dq0;
-    (void)ec_traj_eval_joint_time(plan, t0 + (float)k * MPC_DT, joint, &qk,
-                                  &dqk, NULL);
-    delta_seq[k][0] = q0 - qk;
-    delta_seq[k][1] = dq0 - dqk;
-  }
+  (void)rnea(arg, res, NULL, NULL, 0);
+  mpc_friction_ff(r->q_dot, fric);
+  for (j = 0; j < ARM_MPC_JOINT_COUNT; ++j) out[j] += fric[j];
 }
 
+/* ---------- MPC: 观测器 + 每拍全部关节求解 ---------- */
+
 /*
- * 每周期解 MPC_JOINTS_PER_TICK 个关节, 其余关节沿用上次的 dtau。
- * 当前生成参数: 2 ms 周期 × 每次 2 个关节, 6 个关节轮一圈 6 ms = MPC_DT。
- * 这个对应关系由生成器保证, 这里用静态断言防止两边参数漂开。
+ * 和 Python 仿真 sim_core.run() 的循环体、PC 回归 ctest/test_loop.c 逐行对应,
+ * 调用顺序和时刻不要改 (说明文档 4.13)。
+ *
+ *   t_meas  反馈对应的时刻 = 现在 - MPC_EST_FB 拍, 观测器用它的参考算误差
+ *   t_apply 力矩真正生效的时刻 = 现在 + MPC_EST_CT 拍, 前馈和 MPC 从这里开始预测
+ *
+ * 1. 前馈: RNEA(实际 q, dq, ddq_ref(t_apply)) + 摩擦补偿
+ * 2. 时域末尾的前馈预测 tau_ff_end = tau_ff + tref(t_apply + NS 拍) - tref(t_apply)
+ * 3. 每个约束检查点的参考 (位置/速度限位要换成误差边界)
+ * 4. 惯量比 rho (P3), 观测器在测量时刻更新 (P1, 所有关节)
+ * 5. 每个关节: 观测器前推到 t_apply 得到锚点和扰动估计 (P2), 定迭代 ADMM 求 u
+ * 6. dtau = rho * u, 按 effort 饱和
+ * 观测器的 commit 要用真正发出去的量, 在输出之后做 (commit_applied_torque)。
+ *
+ * 未接电机的关节按理想跟踪, 测量误差恒为 0、不求解、修正量为 0, 观测器就一直
+ * 停在 0, 不会把 "算出来但没发出去" 的修正量当成扰动积分进去。
+ *
+ * 返回 false 表示轨迹求值失败。
  */
 _Static_assert(MPC_NJ == ARM_MPC_JOINT_COUNT, "MPC joint count mismatch");
-_Static_assert(MPC_NJ % MPC_JOINTS_PER_TICK == 0,
-               "MPC_JOINTS_PER_TICK must divide MPC_NJ");
 
-static void mpc_staggered_solve(ArmMpcTask *self, const EC_TrajPlan *plan) {
-  float anchor[2];
-  float delta_seq[MPC_N + 1][2];
-  float q_vec[MPC_NZ], l_vec[MPC_NC], u_vec[MPC_NC];
-  uint8_t i;
+static bool mpc_solve_all(ArmMpcTask *self, const EC_TrajPlan *plan) {
+  const uint32_t step = ARM_MPC_TICKS_PER_STEP;
+  const uint32_t t_meas = self->tick - (uint32_t)MPC_EST_FB * step;
+  const uint32_t t_apply = self->tick + (uint32_t)MPC_EST_CT * step;
+  EC_JointStateReference r_meas, r_apply, r_end, r_e;
+  float tref0[ARM_MPC_JOINT_COUNT], tref1[ARM_MPC_JOINT_COUNT];
+  float tau_ff_end[ARM_MPC_JOINT_COUNT];
+  float dtau[ARM_MPC_JOINT_COUNT], tau_cmd[ARM_MPC_JOINT_COUNT];
+  float qr_e[MPC_CS_NB][ARM_MPC_JOINT_COUNT];
+  float dqr_e[MPC_CS_NB][ARM_MPC_JOINT_COUNT];
+  uint8_t i, j;
 
-  for (i = 0; i < MPC_JOINTS_PER_TICK; ++i) {
-    const uint8_t j = self->mpc_joint_index;
-    int status;
-
-    self->mpc_joint_index = (uint8_t)((j + 1u) % ARM_MPC_JOINT_COUNT);
-
-    anchor[0] = self->ref.q[j] - self->q_actual[j];
-    anchor[1] = self->ref.q_dot[j] - self->dq_actual[j];
-    build_delta_seq(plan, self->tick, j, self->ref.q[j], self->ref.q_dot[j],
-                    delta_seq);
-
-    /* 钳位在 mpc_build_vectors 内部完成。 */
-    mpc_build_vectors((int)j, anchor, delta_seq, q_vec, l_vec, u_vec);
-
-    /* update/solve 调用失败 (参数或内部错误) 时沿用上次的 dtau, 不写 0:
-     * 突然撤掉修正量比用一个过期值更糟。 */
-    if (mpc_update_joint((int)j, q_vec, l_vec, u_vec) != 0 ||
-        mpc_solve_joint((int)j) != 0) {
-      ++self->mpc_fail_count;
-      continue;
+  if (!ec_traj_eval_tick(plan, t_meas, &r_meas) ||
+      !ec_traj_eval_tick(plan, t_apply, &r_apply) ||
+      !ec_traj_eval_tick(plan, t_apply + (uint32_t)MPC_CS_NS * step, &r_end)) {
+    return false;
+  }
+  for (i = 0; i < MPC_CS_NB; ++i) {
+    if (!ec_traj_eval_tick(plan, t_apply + (uint32_t)MPC_CS_ENDS[i] * step,
+                           &r_e)) {
+      return false;
     }
-
-    /* 未收敛 (max_iter 用尽) 时也采用当前迭代点, 和仿真的
-     * USE_UNCONVERGED_ITERATE=True 保持一致; 只计数, 不丢弃。 */
-    status = mpc_get_status((int)j);
-    if (status != ARM_MPC_OSQP_SOLVED &&
-        status != ARM_MPC_OSQP_SOLVED_INACCURATE) {
-      ++self->mpc_unconverged_count;
+    for (j = 0; j < ARM_MPC_JOINT_COUNT; ++j) {
+      qr_e[i][j] = r_e.q[j];
+      dqr_e[i][j] = r_e.q_dot[j];
     }
-    self->mpc_dtau[j] = mpc_get_first_dtau((int)j); /* 已钳到 ±MPC_DTAU_MAX */
+  }
+
+  /* 1-2. 前馈和时域末尾的前馈预测 */
+  compute_feedforward(self, r_apply.q_ddot);
+  reference_torque(&r_apply, tref0);
+  reference_torque(&r_end, tref1);
+  for (j = 0; j < ARM_MPC_JOINT_COUNT; ++j) {
+    tau_ff_end[j] = self->tau_ff[j] + (tref1[j] - tref0[j]);
+  }
+
+  /* 4. 惯量比; 观测器在测量时刻更新 */
+  mpc_inertia_ratio(self->q_actual, self->rho);
+  for (j = 0; j < ARM_MPC_JOINT_COUNT; ++j) {
+    if (self->motors[j]) {
+      mpc_est_update((int)j, r_meas.q[j] - self->q_actual[j],
+                     r_meas.q_dot[j] - self->dq_actual[j]);
+    } else {
+      mpc_est_update((int)j, 0.0f, 0.0f);
+    }
+  }
+
+  /* 5. 每个关节: 前推锚点 + 求解 */
+  for (j = 0; j < ARM_MPC_JOINT_COUNT; ++j) {
+    float anchor[2];
+    float w_hat = 0.0f;
+    float qe[MPC_CS_NB], dqe[MPC_CS_NB];
+    float u = 0.0f;
+
+    mpc_est_anchor((int)j, anchor, &w_hat);
+    self->w_hat[j] = w_hat;
+    if (self->motors[j]) {
+      for (i = 0; i < MPC_CS_NB; ++i) {
+        qe[i] = qr_e[i][j];
+        dqe[i] = dqr_e[i][j];
+      }
+      u = mpc_cs_step((int)j, anchor, w_hat, self->tau_ff[j], tau_ff_end[j],
+                      self->rho[j], qe, dqe);
+    }
+    dtau[j] = self->rho[j] * u;
+  }
+
+  /* 6. 按 effort 饱和; 修正量记成饱和之后实际加上去的部分 */
+  (void)mpc_saturate_total(self->tau_ff, dtau, tau_cmd);
+  for (j = 0; j < ARM_MPC_JOINT_COUNT; ++j) {
+    self->mpc_dtau[j] = tau_cmd[j] - self->tau_ff[j];
+  }
+  return true;
+}
+
+/*
+ * 告诉观测器这一拍真正发出去的修正量 u = (tau_total - tau_ff) / rho。
+ * 必须用 output_torque() 按 tau_max 截完以后的值: 观测器只认实际作用的量,
+ * 积分作用才不会在饱和时越积越多。未接的关节发出去的修正量是 0。
+ */
+static void commit_applied_torque(ArmMpcTask *self) {
+  uint8_t j;
+  for (j = 0; j < ARM_MPC_JOINT_COUNT; ++j) {
+    float u = 0.0f;
+    if (self->motors[j] && self->rho[j] > 0.0f) {
+      u = (self->tau_total[j] - self->tau_ff[j]) / self->rho[j];
+    }
+    mpc_est_commit((int)j, u);
   }
 }
 
@@ -266,9 +333,10 @@ static void output_zero_force(ArmMpcTask *self) {
 }
 
 /*
- * 总力矩 = RNEA 前馈 + MPC 修正, 按关节力矩上限饱和后直接以 N·m 下发。
- * MPC 只管住了 dtau, tau_ff 里的科氏/离心项按 dq^2 增长, 总力矩本身必须
- * 在这里兜底。tau_max 在初始化时已经和电机的 T_MAX 取过小值。
+ * 总力矩 = 前馈 + MPC 修正, 按关节力矩上限饱和后直接以 N·m 下发。
+ * 求解器已经保证 |tau_ff + dtau| 不超过生成代码里的 effort (MPC_EFFORT_MAX),
+ * 这里按 joint_cfg 的 tau_max 再截一次, 是调试阶段更保守的上限, 也是最后一道
+ * 保险。tau_max 在初始化时已经和电机的 T_MAX 取过小值。
  * 返回 false 表示结果非有限值 (不应发生, 发生就按故障处理)。
  */
 static bool output_torque(ArmMpcTask *self) {
@@ -333,6 +401,10 @@ static void leave_limp(ArmMpcTask *self) {
   ins_traj_clear_fault(&self->traj, self->tick, self->q_actual);
   target_follow_actual(self); /* 目标就是保持点, 恢复出力后原地不动 */
   memset(self->mpc_dtau, 0, sizeof(self->mpc_dtau));
+  /* 零力矩期间观测器和求解器都没跑 (实际发出去的修正量是 -tau_ff, 喂进去会被
+   * 当成巨大的扰动), 恢复出力时从零开始, 和仿真的初始状态一致。 */
+  mpc_est_reset();
+  mpc_cs_reset();
   self->limp = false;
 }
 
@@ -351,6 +423,10 @@ bool ArmMpcTaskInit(ArmMpcTask *self,
 
   if (!self || !joint_cfg) return false;
   memset(self, 0, sizeof(*self));
+  /* 生成代码的离散步长必须等于控制周期, 否则预测、观测器、延迟补偿全错 */
+  if (fabsf(MPC_BASE_DT - INS_ARM_CONTROL_PERIOD) > 1e-6f) return false;
+  mpc_est_reset();
+  mpc_cs_reset();
 
   for (j = 0; j < ARM_MPC_JOINT_COUNT; ++j) {
     if (!joint_config_valid(&joint_cfg[j])) return false;
@@ -491,19 +567,24 @@ void ArmMpcTaskRun(ArmMpcTask *self) {
   }
   self->arrived = target_arrived(self);
 
-  /* ---- 4. RNEA 前馈 + MPC 错峰求解 ---- */
+  /* ---- 4. 前馈 + 观测器 + MPC (每拍全部关节) ---- */
   cycle_start = DWT->CYCCNT;
-  compute_rnea_feedforward(self);
   plan = ins_traj_plan(&self->traj);
-  if (plan) mpc_staggered_solve(self, plan);
+  if (!plan || !mpc_solve_all(self, plan)) {
+    self->fault_flags |= ARM_MPC_FAULT_TRAJ;
+    enter_limp(self);
+    return;
+  }
   self->cycles_last = DWT->CYCCNT - cycle_start;
   if (self->cycles_last > self->cycles_max) {
     self->cycles_max = self->cycles_last;
   }
 
-  /* ---- 5. 输出 ---- */
+  /* ---- 5. 输出, 再把真正发出去的量告诉观测器 ---- */
   if (!output_torque(self)) {
     self->fault_flags |= ARM_MPC_FAULT_TORQUE;
     enter_limp(self);
+    return;
   }
+  commit_applied_torque(self);
 }

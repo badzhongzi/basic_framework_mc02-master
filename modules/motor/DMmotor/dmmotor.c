@@ -42,6 +42,9 @@ static void DMMotorSetLimit(DMMotorInstance *motor)
     case DM4310:
         motor->limit = (DM_Motor_Limit_s){DM4310_P_MAX, DM4310_V_MAX, DM4310_T_MAX};
         break;
+    case DM4310P:
+        motor->limit = (DM_Motor_Limit_s){DM4310P_P_MAX, DM4310P_V_MAX, DM4310P_T_MAX};
+        break;
     default:
         motor->limit = (DM_Motor_Limit_s){DM_P_MAX, DM_V_MAX, DM_T_MAX};
         break;

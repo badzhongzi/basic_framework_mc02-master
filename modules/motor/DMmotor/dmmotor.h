@@ -10,16 +10,21 @@
 
 /*
  * MIT协议的映射范围(对称,±MAX),必须和达妙上位机里给电机设置的PMAX/VMAX/TMAX一致,
- * 否则收发的位置/速度/力矩会按比例错位.以下为占位值,实物到了用上位机读出来核对.
+ * 否则收发的位置/速度/力矩会按比例错位,而且不会有任何报错.
+ * 6248P/4340P/4310P 是上位机里实际设置的值; 4310 没有给定, 沿用原来的占位值, 上板前用上位机核对.
  * 单位: 位置rad,速度rad/s,力矩N·m,均为减速器输出端
  */
 #define DM6248P_P_MAX 12.566f
-#define DM6248P_V_MAX 20.0f
-#define DM6248P_T_MAX 120.0f
+#define DM6248P_V_MAX 45.0f
+#define DM6248P_T_MAX 48.0f
 
 #define DM4340P_P_MAX 12.5f
 #define DM4340P_V_MAX 10.0f
 #define DM4340P_T_MAX 28.0f
+
+#define DM4310P_P_MAX 12.5f
+#define DM4310P_V_MAX 30.0f
+#define DM4310P_T_MAX 12.5f
 
 #define DM4310_P_MAX 12.5f
 #define DM4310_V_MAX 30.0f
@@ -112,7 +117,7 @@ typedef enum
 /**
  * @brief 注册达妙电机(MIT模式)
  *        can_init_config.tx_id 填电机的CAN_ID, rx_id 填电机的MST_ID(反馈帧的ID)
- *        motor_type 填 DM6248P/DM4340P/DM4310, 决定MIT映射范围
+ *        motor_type 填 DM6248P/DM4340P/DM4310/DM4310P, 决定MIT映射范围
  *        不会发送零位设置指令, 零位由达妙上位机预先设置好
  */
 DMMotorInstance *DMMotorInit(Motor_Init_Config_s *config);
