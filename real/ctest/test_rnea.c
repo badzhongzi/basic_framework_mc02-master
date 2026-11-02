@@ -33,6 +33,7 @@ typedef struct {
     double sum_abs;
     int    worst_case;
     int    worst_joint;
+    double worst_tol_ratio;   /* max over components of |误差| / 该关节判据 */
 } Group;
 
 static Case  cases[MAX_CASES];
@@ -81,7 +82,15 @@ bad:
     }
     fclose(f);
 
-    const double tol = TOL_FRACTION_OF_DTAU * (double)MPC_DTAU_MAX;
+    /* 判据取各关节自己的修正权限的 1%：DTAU_MAX 现在逐关节，
+     * 手腕只有 0.5 Nm，用六轴最大值当判据等于对手腕不设判据。 */
+    /* 本测试只链接 rnea_6axis.c，不链接 mpc_6axis.c，所以用头文件里的
+     * 初始化式而不是那个 extern 数组。 */
+    static const float dtau_lim[MPC_NJ] = MPC_DTAU_MAX_LIST;
+    double tol_j[MAX_NJ];
+    for (int j = 0; j < n; ++j)
+        tol_j[j] = TOL_FRACTION_OF_DTAU * (double)dtau_lim[j];
+    const double tol = TOL_FRACTION_OF_DTAU * (double)MPC_DTAU_MAX_WORST;
     double overall_worst_abs = 0.0, overall_worst_rel = 0.0;
     int n_over_tol = 0, n_nonfinite = 0;
 
@@ -114,12 +123,17 @@ bad:
             if (rel > g->worst_rel) g->worst_rel = rel;
             if (e > overall_worst_abs) overall_worst_abs = e;
             if (rel > overall_worst_rel) overall_worst_rel = rel;
-            if (e > tol) n_over_tol++;
+            if (e > tol_j[j]) n_over_tol++;
+            double tol_ratio = e / tol_j[j];
+            if (tol_ratio > g->worst_tol_ratio) g->worst_tol_ratio = tol_ratio;
         }
     }
 
-    printf("用例 %d 个, 自由度 %d, 判据 = %.1f%% * DTAU_MAX = %.4g Nm\n",
-           count, n, 100.0 * TOL_FRACTION_OF_DTAU, tol);
+    printf("用例 %d 个, 自由度 %d, 判据 = %.1f%% * 各关节 DTAU_MAX\n",
+           count, n, 100.0 * TOL_FRACTION_OF_DTAU);
+    printf("逐关节判据 [Nm] =");
+    for (int j = 0; j < n; ++j) printf(" %.4g", tol_j[j]);
+    printf("   (最宽 %.4g)\n", tol);
     printf("\n%-10s %6s %14s %14s %12s   %s\n",
            "分组", "用例", "平均|误差|", "最大|误差|", "最大相对", "最坏点");
     for (int g = 0; g < ngroups; ++g) {
@@ -143,8 +157,9 @@ bad:
 
     printf("\n非有限输出     %d\n", n_nonfinite);
     printf("超判据的分量   %d\n", n_over_tol);
-    printf("全局最大|误差| %.4g Nm  (%.3g%% of DTAU_MAX)\n",
-           overall_worst_abs, 100.0 * overall_worst_abs / (double)MPC_DTAU_MAX);
+    printf("全局最大|误差| %.4g Nm  (%.3g%% of 最大 DTAU_MAX)\n",
+           overall_worst_abs,
+           100.0 * overall_worst_abs / (double)MPC_DTAU_MAX_WORST);
     printf("全局最大相对   %.3g\n", overall_worst_rel);
 
     /* 极端组允许超绝对判据（dq=130 rad/s 不是真实工况，力矩本身就到几百 Nm），
@@ -152,10 +167,10 @@ bad:
     int fail = (n_nonfinite > 0) || (overall_worst_rel > 1.0e-3);
     for (int g = 0; g < ngroups; ++g) {
         if (strcmp(groups[g].name, "extreme") == 0) continue;
-        if (groups[g].worst_abs > tol) fail = 1;
+        if (groups[g].worst_tol_ratio > 1.0) fail = 1;
     }
     printf("\n%s\n", fail ? "FAIL"
-           : "PASS  (判据: 输出有限; gravity/sim 组最大误差 <= 1% DTAU_MAX; "
-             "全局相对误差 <= 1e-3)");
+           : "PASS  (判据: 输出有限; gravity/sim 组每个分量误差 <= 1% 本关节 "
+             "DTAU_MAX; 全局相对误差 <= 1e-3)");
     return fail ? 1 : 0;
 }

@@ -1,0 +1,6 @@
+写入 C:\Users\Badzhongzi\PycharmProjects\PythonProject\real\ctest\loop_cases.txt
+  段 [0, 3000) t = [0, 6] s
+  段 [5950, 6450) t = [11.9, 12.9] s
+  段 [8950, 9450) t = [17.9, 18.9] s
+  每拍解全部 6 个关节, 延迟补偿 D = 2, 定迭代 25 次
+loop rc=0

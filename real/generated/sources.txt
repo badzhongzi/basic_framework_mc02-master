@@ -1,0 +1,6 @@
+# 需要编译的文件（都在 generated/ 下），不再依赖 OSQP：
+mpc_6axis.c
+rnea_6axis.c
+crba_6axis.c
+# include 目录：-I generated
+# 链接 libm（sqrtf、tanhf）

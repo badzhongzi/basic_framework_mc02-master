@@ -1,0 +1,5 @@
+写入 C:\Users\Badzhongzi\PycharmProjects\PythonProject\real\ctest\qp_cases.txt: 6720 次求解, 5 段
+  标准      2520 次求解, 首个控制量顶在箱约束上 0 次, J0 max|dq| 0.516, J1 max q 0.0001
+  速度限位    1800 次求解, 首个控制量顶在箱约束上 0 次, J0 max|dq| 3.010, J1 max q 0.0000
+  位置限位    2400 次求解, 首个控制量顶在箱约束上 0 次, J0 max|dq| 0.516, J1 max q 3.1212
+qp rc=0

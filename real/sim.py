@@ -18,7 +18,7 @@ res = sim_core.run(progress=True, debug_steps=3)
 summary = sim_core.summarize(res)
 
 n_joints = res["n_joints"]
-dtau_max = res["settings"].DTAU_MAX
+dtau_max = res["dtau_max"]          # 逐关节数组
 sim_core.print_summary(res, summary)
 
 # ================================================================
@@ -31,6 +31,11 @@ np.savez_compressed(
     t=res["t"], q=res["q"], dq=res["dq"], q_ref=res["q_ref"],
     dq_ref=res["dq_ref"], e=res["e"], e_dq=res["e_dq"],
     tau=res["tau"], tau_ff=res["tau_ff"], dtau=res["dtau"],
+    # e 是控制器看到的带噪声误差，e_true 才是真实误差（评价精度要用后者）
+    e_true=res["e_true"], tau_dist=res["tau_dist"],
+    # 各阶段的分界时刻，画图和统计按它分段
+    t_traj=cfg.T_TRAJ, payload_t=cfg.PAYLOAD_T, impact_t=cfg.IMPACT_T,
+    impact_duration=cfg.IMPACT_DURATION, payload_mass=cfg.PAYLOAD_MASS,
     solve_step=res["solve_step"], solve_joint=res["solve_joint"],
     solve_iter=res["solve_iter"], solve_status=res["solve_status"],
     solve_time_us=res["solve_time_us"], solve_clamped=res["solve_clamped"],
@@ -71,8 +76,8 @@ for i in range(n_joints):
     axes[i, 2].plot(log_t, res["tau"][:, i], label='tau', linewidth=1.3)
     axes[i, 2].plot(log_t, res["tau_ff"][:, i], '--', alpha=0.6, label='ff')
     axes[i, 2].plot(log_t, res["dtau"][:, i], ':', alpha=0.8, label='fb')
-    axes[i, 2].axhline(dtau_max, color='k', lw=0.6, alpha=0.4)
-    axes[i, 2].axhline(-dtau_max, color='k', lw=0.6, alpha=0.4)
+    axes[i, 2].axhline(dtau_max[i], color='k', lw=0.6, alpha=0.4)
+    axes[i, 2].axhline(-dtau_max[i], color='k', lw=0.6, alpha=0.4)
     axes[i, 2].set_ylabel(f'tau{i+1} [Nm]')
     axes[i, 2].legend(loc='upper right', fontsize=8)
     axes[i, 2].grid(True)

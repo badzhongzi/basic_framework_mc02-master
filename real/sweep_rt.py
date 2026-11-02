@@ -26,6 +26,9 @@ CASES = []
 
 
 def add(label, **overrides):
+    # 这里扫的全是 OSQP 的参数，只对旧求解器有意义。新求解器（cs_admm）
+    # 定迭代次数，没有收敛容差和 max_iter 可调，见 mpc_config.py 的 ADMM_*。
+    overrides.setdefault("SOLVER", "osqp")
     overrides.setdefault("T_SIM", T_SIM_SWEEP)
     CASES.append((label, overrides))
 

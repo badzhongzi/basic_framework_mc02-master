@@ -31,7 +31,9 @@ SEED = 12345
 
 def main():
     s = sim_core.Settings()
-    model, data = sim_core.load_model(s.URDF_PATH)
+    # 必须带上 ARMATURE：生成的 rnea_6axis.c 里已经计入转子惯量，
+    # 参考值不带的话对比出来的是建模差异而不是 float32 精度。
+    model, data = sim_core.load_model(s.URDF_PATH, s.ARMATURE)
     n = model.nv
     get_reference, _, _ = sim_core.make_reference(s, n)
 
