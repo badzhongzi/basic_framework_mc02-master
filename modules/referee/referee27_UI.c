@@ -275,7 +275,7 @@ void R27_UICharDraw(r27_interaction_string_t *graph, char graphname[3], uint32_t
 
     {
         /* 协议允许 30 字节字符内容(不一定以 '\0' 结尾), 因此先在 tmp 中格式化再按 30 字节截取 */
-        char tmp[sizeof(graph->data) + 1];
+        char tmp[sizeof(graph->data) + 1] = {0};
 
         va_start(ap, fmt);
         vsnprintf(tmp, sizeof(tmp), fmt, ap);
