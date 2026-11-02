@@ -9,7 +9,7 @@
 #include "robot.h"
 #include "ins_task.h"
 #include "motor_task.h"
-#include "referee_task.h"
+#include "referee27_task.h"
 #include "master_process.h"
 #include "daemon.h"
 #include "HT04.h"
@@ -138,14 +138,14 @@ __attribute__((noreturn)) void StartUITASK(void const *argument)
 {
     uint32_t ui_wake_time;
     LOGINFO("[freeRTOS] UI Task Start");
-    MyUIInit();
+    R27MyUIInit();
     LOGINFO("[freeRTOS] UI Init Done, communication with ref has established");
     ui_wake_time = osKernelSysTick();
     for (;;)
     {
         // 1kHz
-        // 每给裁判系统发送一包数据会挂起一次,详见UITask函数的refereeSend()
-        UITask();
+        // 每给裁判系统发送一包数据会挂起一次,详见 R27RefereeSendThrottled()
+        R27UITask();
         osDelayUntil(&ui_wake_time, 1); // 即使没有任何UI需要刷新,也挂起一次,防止卡在UITask中无法切换
     }
 }

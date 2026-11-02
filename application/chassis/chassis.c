@@ -16,11 +16,12 @@
 #include "dji_motor.h"
 #include "super_cap.h"
 #include "message_center.h"
-#include "referee_task.h"
+#include "referee27_task.h"
+#include "usart.h" // huart1 (旧 rm_referee.h 会间接包含, 新模块不再包含)
 
 #include "general_def.h"
 #include "bsp_dwt.h"
-#include "referee_UI.h"
+#include "referee27_UI.h"
 #include "arm_math.h"
 
 /* 根据robot_def.h中的macro自动计算的参数 */
@@ -42,8 +43,8 @@ static Subscriber_t *chassis_sub;                   // 用于订阅底盘的控�
 static Chassis_Ctrl_Cmd_s chassis_cmd_recv;         // 底盘接收到的控制命令
 static Chassis_Upload_Data_s chassis_feedback_data; // 底盘回传的反馈数据
 
-static referee_info_t* referee_data; // 用于获取裁判系统的数据
-static Referee_Interactive_info_t ui_data; // UI数据，将底盘中的数据传入此结构体的对应变量中，UI会自动检测是否变化，对应显示UI
+static r27_referee_info_t *referee_data; // 用于获取裁判系统的数据
+static r27_interactive_info_t ui_data; // UI数据，将底盘中的数据传入此结构体的对应变量中，UI会自动检测是否变化，对应显示UI
 
 static SuperCapInstance *cap;                                       // 超级电容
 static DJIMotorInstance *motor_lf, *motor_rf, *motor_lb, *motor_rb; // left right forward back
@@ -103,7 +104,7 @@ void ChassisInit()
     chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
     motor_rb = DJIMotorInit(&chassis_motor_config);
 
-    referee_data = UITaskInit(&huart1,&ui_data); // 裁判系统初始化,会同时初始化UI
+    referee_data = R27UITaskInit(&huart1, &ui_data); // 裁判系统初始化,会同时初始化UI
 
     SuperCap_Init_Config_s cap_conf = {
         .can_config = {
@@ -158,8 +159,9 @@ static void MecanumCalculate()
 static void LimitChassisOutput()
 {
     // 功率限制待添加
-    // referee_data->PowerHeatData.chassis_power;
-    // referee_data->PowerHeatData.chassis_power_buffer;
+    // 2027 协议 0x0202 已删除底盘功率, 只能用缓冲能量 + 自测功率
+    // referee_data->PowerHeatData.buffer_energy;
+    // referee_data->RobotStatus.chassis_power_limit;
 
     // 完成功率限制后进行电机参考输入设定
     DJIMotorSetRef(motor_lf, vt_lf);
@@ -242,10 +244,10 @@ void ChassisTask()
 
     // // 获取裁判系统数据   建议将裁判系统与底盘分离，所以此处数据应使用消息中心发送
     // // 我方颜色id小于7是红色,大于7是蓝色,注意这里发送的是对方的颜色, 0:blue , 1:red
-    // chassis_feedback_data.enemy_color = referee_data->GameRobotState.robot_id > 7 ? 1 : 0;
+    // chassis_feedback_data.enemy_color = referee_data->RobotStatus.robot_id > 100 ? 1 : 0; // 2027: 蓝方 ID = 红方 + 100
     // // 当前只做了17mm热量的数据获取,后续根据robot_def中的宏切换双枪管和英雄42mm的情况
-    // chassis_feedback_data.bullet_speed = referee_data->GameRobotState.shooter_id1_17mm_speed_limit;
-    // chassis_feedback_data.rest_heat = referee_data->PowerHeatData.shooter_heat0;
+    // chassis_feedback_data.bullet_speed = referee_data->RobotStatus.bullet_speed_limit;
+    // chassis_feedback_data.rest_heat = referee_data->PowerHeatData.shooter_17mm_barrel_heat;
 
     // 推送反馈消息
 #ifdef ONE_BOARD

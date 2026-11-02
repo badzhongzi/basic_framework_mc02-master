@@ -132,9 +132,9 @@ modules/motor/servo_motor/servo_motor.c \
 modules/motor/motor_task.c \
 modules/oled/oled.c \
 modules/referee/crc_ref.c \
-modules/referee/rm_referee.c \
-modules/referee/referee_UI.c \
-modules/referee/referee_task.c \
+modules/referee/rm_referee27.c \
+modules/referee/referee27_UI.c \
+modules/referee/referee27_task.c \
 modules/remote/remote_control.c \
 modules/super_cap/super_cap.c \
 modules/can_comm/can_comm.c \
