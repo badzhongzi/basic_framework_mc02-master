@@ -8,4 +8,7 @@
         "orbit"
     ],
     "orbit.defaultProgram": "d:\\basic_framework_mc02-master\\basic_framework_mc02-master\\build\\Basic_Framework_MC02.elf",
+    "mcu-debug.rtos-views.trackDebuggers": [
+        "ozone"
+    ],
 }
