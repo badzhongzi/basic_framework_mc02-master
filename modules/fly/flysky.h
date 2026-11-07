@@ -58,22 +58,18 @@
     }
 	
 
+/* 开关值按区间判断, 以上/中、中/下的中点为界. 原来只认 UP/MID/DOWN 三个精确值,
+ * 接收机输出差 1 个数(比如 1023)就会原样留下, 上层哪个分支都进不去 */
+#define FS_SW_THRESH_UP_MID ((uint16_t)((FS_DATA_UP + FS_DATA_MID) / 2))
+#define FS_SW_THRESH_MID_DOWN ((uint16_t)((FS_DATA_MID + FS_DATA_DOWN) / 2))
 #define fs_data_change(data)                                \
 	{                                                    	\
-		switch(data)										\
-		{													\
-			case FS_DATA_DOWN:							    \
-				data = FS_SW_DOWN;							\
-				break;										\
-			case FS_DATA_MID:								\
-				data = FS_SW_MID;							\
-				break;										\
-			case FS_DATA_UP:								\
-				data = FS_SW_UP;							\
-				break;										\
-			default:										\
-				break;										\
-		}													\
+		if ((data) < FS_SW_THRESH_UP_MID)					\
+			data = FS_SW_UP;								\
+		else if ((data) > FS_SW_THRESH_MID_DOWN)			\
+			data = FS_SW_DOWN;								\
+		else												\
+			data = FS_SW_MID;								\
 	}
 
 /* ----------------------- Data Struct ------------------------------------- */

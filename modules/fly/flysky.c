@@ -44,16 +44,32 @@ static void RectifyRCjoystick()
 }
 
 static uint8_t fs_rx_sta=0;
+static uint32_t fs_failsafe_cnt; // 收到的 failsafe 帧数, 调试看
+
+/* SBUS 第 23 字节的标志位 */
+#define SBUS_FLAG_FRAME_LOST 0x04 // 接收机这一帧没收到发射机数据, 通道值是上一帧的
+#define SBUS_FLAG_FAILSAFE 0x08   // 接收机进入失控保护(发射机关机/超出距离), 通道值不可信
+
 /**
  * @brief 遥控器数据解析
  *
  * @param sbus_buf 接收buffer
+ * @return 1: 合法帧且发射机在线, 可以喂狗; 0: 坏帧或失控保护
  */
-static void sbus_to_fs(const uint8_t *sbus_buf)
+static uint8_t sbus_to_fs(const uint8_t *sbus_buf)
 {
+    uint8_t ok = 0;
 #if defined(FS_SBUS) && !defined(FS_iBUS)
     if ((sbus_buf[0] == 0x0F)&&sbus_buf[24]==0x00) fs_rx_sta = 1;
     else fs_rx_sta=0;
+
+    // 很多接收机在发射机关机后仍持续输出 SBUS 帧, 只是置了 failsafe 位. 不查这一位的话
+    // daemon 会一直认为遥控器在线, 开关停在最后的位置. 这种帧不解析、不喂狗, 100 ms 后按离线处理
+    if (fs_rx_sta == 1 && (sbus_buf[23] & SBUS_FLAG_FAILSAFE))
+    {
+        fs_failsafe_cnt++;
+        return 0;
+    }
 
     if(fs_rx_sta==1)
     {
@@ -89,6 +105,7 @@ static void sbus_to_fs(const uint8_t *sbus_buf)
 
         RectifyRCjoystick();
         fs_rx_sta = 0;                        // 准备下一次接收
+        ok = 1;
     }
 #endif
 
@@ -122,9 +139,11 @@ static void sbus_to_fs(const uint8_t *sbus_buf)
 
         RectifyRCjoystick();
         fs_rx_sta = 0;                        // 准备下一次接收
+        ok = 1;
     }
 #endif
     memcpy(&fs_ctrl[LAST], &fs_ctrl[TEMP], sizeof(FS_ctrl_t)); // 保存上一次的数据,用于按键持续按下和切换的判断
+    return ok;
 }
 
 /**
@@ -133,8 +152,9 @@ static void sbus_to_fs(const uint8_t *sbus_buf)
  */
 static void FSRxCallback()
 {
-    DaemonReload(fs_daemon_instance);         // 先喂狗
-    sbus_to_fs(fs_usart_instance->recv_buff); // 进行协议解析
+    // 只有合法帧才喂狗: 坏帧和 failsafe 帧持续 100 ms 就按离线处理
+    if (sbus_to_fs(fs_usart_instance->recv_buff))
+        DaemonReload(fs_daemon_instance);
 }
 
 /**

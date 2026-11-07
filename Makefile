@@ -163,7 +163,9 @@ application/gimbal/Instance/Src/arm_mpc_task.c \
 application/gimbal/Instance/Generated/mpc_6axis.c \
 application/gimbal/Instance/Generated/rnea_6axis.c \
 application/gimbal/Instance/Generated/crba_6axis.c \
-modules/fly/flysky.c
+modules/fly/flysky.c \
+modules/master_link/master_link.c \
+modules/master_link/master_link_protocol.c
 
 # ASM sources
 ASM_SOURCES =  \
@@ -281,7 +283,8 @@ C_INCLUDES =  \
 -IEngineer_Components_master/include \
 -Iapplication/gimbal/Instance/Inc \
 -Iapplication/gimbal/Instance/Generated \
--Imodules/fly
+-Imodules/fly \
+-Imodules/master_link
 
 
 

@@ -54,7 +54,7 @@ and, when the ELF symbols resolve it, `pointerText` such as `→ &rxBuf[12]` wit
 `pointerInfo`; `char *` into read-only ELF data may add `pointerString` such as `"hello"`. Report
 the address and annotation instead of the decimal value. Composite results keep every raw member;
 `memberRole: "artificial" | "internal"` marks compiler and standard-library internals that the
-EmberProbe UI hides by default. See `docs/POINTER-DISPLAY.md` in the extension repository.
+EmberProbe UI hides by default. See `docs/design/variable-display.md` in the extension repository.
 Running multi-read observations are not atomic snapshots. For task-local variables or
 GDB's paused object presentation and paging, read
 [../../mcu-debug-control/references/paused-inspection.md](../../mcu-debug-control/references/paused-inspection.md).
@@ -71,6 +71,12 @@ Agent CSV reads the chart's full sampling archive. Column headers include the de
 
 ```bash
 node <skill-dir>/scripts/read.js --workspace <workspace> --export-csv --variables counter,temperature --last 30 --output exports/live.csv
+```
+
+To save the current values of an array or structure (an ADC buffer, a log ring, a parameter table) for a spreadsheet, read once with `--snapshot-csv` and a workspace-relative `--output`; no chart is needed. A single requested array is written as a table: an `index` column plus one column per scalar leaf (`value` for scalar elements, member paths such as `pos.x` for struct arrays). Any other request is written as `variable,path,type,value` rows. 64-bit values keep their exact text. stdout reports `format`, `rows`, `output` and the usual read metadata (`firmwareConsistency`, `partial`, `variableErrors`) instead of the values. The read budgets above still apply: if a large array fails with `LIVE_READ_BUDGET_EXCEEDED`, export it as slices (`log[0:1023]`, `log[1024:2047]`, ...) into separate files; element indices in each table stay absolute.
+
+```bash
+node <skill-dir>/scripts/read.js --workspace <workspace> --snapshot-csv --variables adc_buf --output exports/adc.csv
 ```
 
 If an EmberProbe-managed debug target is running, reads are limited to writable allocated ELF RAM. A paused session may use DAP memory. Never pause a user-managed session implicitly. Report resolved names, inferred types, exact text values where present, source, and concise trend or composite results.

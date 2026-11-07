@@ -1,6 +1,7 @@
 "use strict";
-// 将片上 Flash 与本地 ELF 比对（OpenOCD verify_image）：halt 目标、校验、恢复原运行状态。
-// 先输出预检 JSON，--execute 输出 {verified, elf, elfSha256, detail} 并以退出码反映结果。
+// Compares on-chip flash with the local ELF (OpenOCD verify_image): halts the target, verifies and restores its run
+// state. Prints the preflight JSON first; --execute prints {verified, elf, elfSha256, detail} and reports the result in
+// the exit code.
 const fs = require("fs");
 const { call } = require("../../_emberprobe/agent-client");
 const {
@@ -47,10 +48,13 @@ async function main() {
         return;
     }
     emit(result);
-    if (!options["confirmation-id"])
-        fail(
-            "Verification confirmation is required. Show the preflight plan in the Agent conversation, then rerun with --execute --confirmation-id <id> only after explicit approval."
-        );
+    if (!options["confirmation-id"]) {
+        const authorization = await authorizeFlash(result, undefined, "flash.verify");
+        if (authorization?.authorized !== true)
+            fail(
+                "Verification confirmation is required. Show the preflight plan in the Agent conversation, then rerun with --execute --confirmation-id <id> only after explicit approval."
+            );
+    }
     if (!result.openocdCompatible) {
         fail(
             `Incompatible OpenOCD ${result.openocdVersion || "(unknown version)"}; EmberProbe requires ${result.minimumOpenocdVersion} or newer. Upgrade OpenOCD${process.platform === "win32" ? " or select EmberProbe's bundled xPack build" : ""}.`

@@ -23,7 +23,15 @@ matching skill script or MCP tool.
 
 ## Failure handling
 
-Confirm sensitive Bridge operations in the Agent conversation. Show the returned concrete
+The user may enable **Allow all Agent operations** in the EmberProbe sidebar's Agent Configuration card.
+When the Bridge reports `mode: "full"` with `authorized: true` or `confirmationRequired: false`,
+use that explicit workspace grant without asking for a second approval or manufacturing a confirmation ID.
+Never enable this setting yourself, infer it from the task, or bypass a returned confirmation request.
+Probe ownership, target identity, firmware consistency and input checks still apply. Anonymous probes
+retain one-time-only Flash/variable-write permission, and a mismatched ELF still requires write confirmation.
+
+
+When `confirmationRequired` is true, confirm sensitive Bridge operations in the Agent conversation. Show the returned concrete
 plan and wait for the human's answer before submitting its confirmation ID. Flash programming,
 variable/peripheral writes, CubeMX generation, and Flash verification that temporarily halts
 the target use plan-bound IDs; EmberProbe does not show a second operation approval dialog.
@@ -36,8 +44,7 @@ Do not turn a Windows instance-ID tail into `--probe-serial`: it may differ from
 descriptor (for example, `ATK_20190528` versus `ATK 20190528`). Use the explicitly supplied
 USB serial or leave it empty for a uniquely matched probe. Network backends are configured
 in the trusted interface script and do not require a local USB probe.
-An empty serial resolves in this order: the `emberprobe.probeSerial` setting, a serial in the
-interface script, the workspace's
+An empty serial resolves in this order: a serial in the interface script, the workspace's
 selected probe (`config.get` → `selectedProbe` with `source: "user"`: the probe the user picked in
 the sidebar), then a unique connected probe. `probe.list` marks that device with `selected: true`;
 only the user changes the selection, in the sidebar. A selected probe that is not connected is
@@ -93,6 +100,12 @@ evidence that hardware is disconnected.
 
 ## Cross-skill calls
 
+- Peripheral reads/writes reuse an active sampling connection or the selected supported debug connection;
+  they never start a temporary connection. Without debugging, start sampling explicitly and wait for it to
+  connect before register access. `PERIPHERAL_SAMPLING_REQUIRED` means no usable sampling connection exists.
+  Managed single-core and sampling accesses never halt/reset/resume. Multicore/external-server access remains
+  paused-only. Bitfield writes are not atomic against firmware/hardware. A completed write with different or
+  unavailable readback does not prove that nothing was written; never automatically resend it.
 - The debug probe has a **single owner**. Do not start a second OpenOCD-backed operation
   (flash, chip info, fault read, sampling) while another is running; `PROBE_BUSY` means wait or
   let the user stop the current owner — the skill never implicitly pauses or preempts.

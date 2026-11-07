@@ -1,0 +1,874 @@
+"use strict";
+const fs = require("fs");
+const path = require("path");
+const net = require("net");
+const crypto = require("crypto");
+const { call, variableErrorDiagnostics, writeDiagnostic } = require("../../_emberprobe/agent-client");
+const { leavesDirectory } = require("../../_emberprobe/file-identity");
+
+const TYPES = new Set(["u8", "i8", "u16", "i16", "u32", "i32", "f32", "u64", "i64", "f64"]);
+const WIDTH = { u8: 1, i8: 1, u16: 2, i16: 2, u32: 4, i32: 4, f32: 4, u64: 8, i64: 8, f64: 8 };
+
+function stringify(value) {
+    return JSON.stringify(value, (_key, item) => {
+        if (typeof item === "number" && !Number.isFinite(item))
+            return Number.isNaN(item) ? "NaN" : item > 0 ? "Infinity" : "-Infinity";
+        return item;
+    });
+}
+
+function args(argv) {
+    const out = {};
+    for (let i = 0; i < argv.length; i++) {
+        const key = argv[i];
+        if (!key.startsWith("--")) throw new Error(`Unexpected argument: ${key}`);
+        const name = key.slice(2);
+        if (
+            name === "list" ||
+            name === "trend" ||
+            name === "read" ||
+            name === "export-csv" ||
+            name === "snapshot-csv" ||
+            name === "json-array"
+        )
+            out[name] = true;
+        else {
+            const value = argv[++i];
+            if (value === undefined || value.startsWith("--")) throw new Error(`Missing value for --${name}`);
+            out[name] = value;
+        }
+    }
+    return out;
+}
+
+// When some variables fail the extension still returns the others with variableErrors; each is completed into a
+// structured diagnostic so agents judge every item instead of failing the whole batch.
+function withVariableErrors(result, operation) {
+    if (!Array.isArray(result?.variableErrors) || !result.variableErrors.length) return result;
+    return { ...result, partial: true, variableErrors: variableErrorDiagnostics(result, { operation }) };
+}
+
+// --list prints NDJSON by default: one JSON symbol per line, each repeating elf/elfSha256/elfMtimeMs. --json-array
+// prints a single object { elf, elfSha256, elfMtimeMs, symbols: [...] } for JSON.parse(stdout).
+function listOutput({ elf, snapshot, symbols }, jsonArray = false) {
+    const binding = { elf, elfSha256: snapshot.sha256, elfMtimeMs: snapshot.mtimeMs };
+    const entries = symbols.map((symbol) => ({
+        ...symbol,
+        ...(symbol.objectFile ? { sourceFile: symbol.objectFile } : {}),
+        inferredType: infer(symbol.size),
+        compositeCandidate: symbol.size > 8
+    }));
+    if (jsonArray) return stringify({ ...binding, symbols: entries }) + "\n";
+    return entries.map((entry) => stringify({ ...binding, ...entry }) + "\n").join("");
+}
+
+function boundedInteger(value, fallback, min, max, name) {
+    if (value === undefined || value === "") return fallback;
+    const parsed = Number(value);
+    if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+        throw new Error(`${name} must be an integer from ${min} to ${max}`);
+    }
+    return parsed;
+}
+
+function parseTimestamp(value, name, now = Date.now()) {
+    if (value === undefined || value === "") return undefined;
+    const text = String(value).trim();
+    if (/^\d{12,}$/.test(text)) {
+        const epoch = Number(text);
+        if (Number.isFinite(epoch)) return epoch;
+    }
+    const clock = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(text);
+    if (clock) {
+        const hour = Number(clock[1]),
+            minute = Number(clock[2]),
+            second = Number(clock[3] || 0);
+        if (hour <= 23 && minute <= 59 && second <= 59) {
+            const result = new Date(now);
+            result.setHours(hour, minute, second, 0);
+            return result.getTime();
+        }
+    }
+    const parsed = Date.parse(text);
+    if (Number.isFinite(parsed)) return parsed;
+    throw new Error(`${name} must be epoch milliseconds, ISO time, or local HH:MM[:SS]`);
+}
+
+function exportRange(opt, now = Date.now()) {
+    const to = parseTimestamp(opt.to, "--to", now) ?? now;
+    let from = parseTimestamp(opt.from, "--from", now);
+    if (opt.last !== undefined) {
+        if (from !== undefined) throw new Error("--last cannot be combined with --from");
+        const seconds = Number(opt.last);
+        if (!Number.isFinite(seconds) || seconds <= 0) throw new Error("--last must be a positive number of seconds");
+        from = to - seconds * 1000;
+    }
+    if (from !== undefined && from > to) throw new Error("--from must not be later than --to");
+    return { from, to };
+}
+
+function exportRangeDetails(opt, range) {
+    const clockPattern = /^\d{1,2}:\d{2}(?::\d{2})?$/;
+    const offsetMinutes = -new Date(range.to).getTimezoneOffset();
+    const sign = offsetMinutes >= 0 ? "+" : "-";
+    const absoluteOffset = Math.abs(offsetMinutes);
+    const offset = `${sign}${String(Math.floor(absoluteOffset / 60)).padStart(2, "0")}:${String(absoluteOffset % 60).padStart(2, "0")}`;
+    return {
+        input: {
+            from: opt.from ?? null,
+            to: opt.to ?? null,
+            lastSeconds: opt.last === undefined ? null : Number(opt.last)
+        },
+        resolvedUtc: {
+            from: range.from === undefined ? null : new Date(range.from).toISOString(),
+            to: new Date(range.to).toISOString()
+        },
+        localTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "system-local",
+        localUtcOffset: `UTC${offset}`,
+        bareClockUsesLocalTime: clockPattern.test(String(opt.from || "")) || clockPattern.test(String(opt.to || "")),
+        guidance:
+            "Prefer --last for relative ranges or full ISO 8601 timestamps ending in Z for UTC. Bare HH:MM[:SS] is interpreted in the machine's local time zone."
+    };
+}
+
+// Compilation-unit prefix: 'dir/main.c'::, "main.c"::, main.c::, src/main.c:: or 0x2000abcd:: (the extension's parsing
+// rules).
+const SCOPE_PREFIX =
+    /^(?:'[^'\x00-\x1f]{1,1024}'|"[^"\x00-\x1f]{1,1024}"|[\w.+~/\\-]{0,512}\.[A-Za-z0-9_+]+|0x[0-9a-fA-F]{1,8})::(?=[A-Za-z_])/;
+
+function variableSpecs(value) {
+    const specs = String(value || "")
+        .split(",")
+        .filter(Boolean)
+        .map((raw) => {
+            const trimmed = raw.trim();
+            // '.' and ':' inside a compilation-unit prefix belong to neither a member path nor a type suffix.
+            const prefix = (SCOPE_PREFIX.exec(trimmed) || [""])[0].length;
+            const rest = trimmed.slice(prefix);
+            // Path syntax (member sensor.x, element buf[0], range buf[1:5], all buf[*]) is passed whole as the variable
+            // name; the extension infers the type from the DWARF layout, so ':' is not split off as a type.
+            if (rest.includes("[") || rest.includes(".")) {
+                if (!trimmed) throw new Error("Variable name is required");
+                return { name: trimmed };
+            }
+            // In C++ qualified names :: is part of the name; only a single colon introduces an explicit type.
+            const lastColon = trimmed.lastIndexOf(":");
+            const split = lastColon > prefix && trimmed[lastColon - 1] !== ":" ? lastColon : -1;
+            const name = (split > 0 ? trimmed.slice(0, split) : trimmed).trim();
+            const type = split > 0 ? trimmed.slice(split + 1).trim() : "";
+            if (!name) throw new Error("Variable name is required");
+            if (type && !TYPES.has(type)) throw new Error(`Unsupported variable type: ${type}`);
+            return type ? { name, type } : { name };
+        });
+    if (!specs.length) throw new Error("Pass --variables name[,name...]");
+    return specs;
+}
+
+function newestElf(root) {
+    let best = null;
+    const visit = (dir) => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+            if (entry.name === ".git" || entry.name === "node_modules") continue;
+            const full = path.join(dir, entry.name);
+            if (entry.isDirectory()) visit(full);
+            else if (entry.isFile() && entry.name.toLowerCase().endsWith(".elf")) {
+                const mtime = fs.statSync(full).mtimeMs;
+                if (!best || mtime > best.mtime) best = { path: full, mtime };
+            }
+        }
+    };
+    visit(root);
+    return best && best.path;
+}
+
+function parseSymbolsBuffer(buffer) {
+    const b = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+    if (b.length < 52 || b.toString("latin1", 1, 4) !== "ELF" || b[4] !== 1 || b[5] !== 1) {
+        throw new Error("Only ELF32 little-endian firmware is supported");
+    }
+    const shoff = b.readUInt32LE(32),
+        shentsize = b.readUInt16LE(46) || 40,
+        shnum = b.readUInt16LE(48);
+    if (shentsize < 40 || !shoff || !shnum || shoff + shnum * shentsize > b.length) {
+        throw new Error("ELF section table is out of bounds");
+    }
+    const sections = [];
+    for (let i = 0; i < shnum; i++) {
+        const o = shoff + i * shentsize;
+        if (o + 40 > b.length) break;
+        sections.push({
+            type: b.readUInt32LE(o + 4),
+            flags: b.readUInt32LE(o + 8),
+            addr: b.readUInt32LE(o + 12) >>> 0,
+            offset: b.readUInt32LE(o + 16),
+            size: b.readUInt32LE(o + 20),
+            link: b.readUInt32LE(o + 24),
+            entsize: b.readUInt32LE(o + 36)
+        });
+    }
+    const sym = sections.find((s) => s.type === 2) || sections.find((s) => s.type === 11);
+    if (!sym || !sections[sym.link]) throw new Error("ELF has no usable symbol table");
+    const str = sections[sym.link],
+        groups = new Map(),
+        ent = sym.entsize || 16;
+    const inBounds = (s) => s.offset <= b.length && s.size <= b.length - s.offset;
+    if (!inBounds(sym) || !inBounds(str) || ent < 16) throw new Error("ELF symbol table is out of bounds");
+    const cstr = (p) => {
+        const endLimit = str.offset + str.size;
+        if (p < str.offset || p >= endLimit) return "";
+        let e = p;
+        while (e < endLimit && b[e]) e++;
+        return e < endLimit ? b.toString("utf8", p, e) : "";
+    };
+    // As in the extension: with GCC -O0 and no -fdata-sections, statics in .bss are NOTYPE LOCAL; such symbols are
+    // accepted only if sized and entirely inside a writable allocated section (SHF_WRITE|SHF_ALLOC).
+    const untypedLocalData = (o, section, address, size) => {
+        const owner = sections[section];
+        return (
+            b[o + 12] >> 4 === 0 &&
+            size > 0 &&
+            !!owner &&
+            (owner.flags & 3) === 3 &&
+            address >= owner.addr &&
+            address + size <= owner.addr + owner.size
+        );
+    };
+    // STT_FILE marks the source file (basename) of the local symbols that follow, distinguishing same-named statics in
+    // different compilation units.
+    let objectFile = "";
+    for (let o = sym.offset; o + 16 <= Math.min(b.length, sym.offset + sym.size); o += ent) {
+        const type = b[o + 12] & 15;
+        const local = b[o + 12] >> 4 === 0;
+        if (type === 4) {
+            objectFile = local ? cstr(str.offset + b.readUInt32LE(o)) : "";
+            continue;
+        }
+        const section = b.readUInt16LE(o + 14),
+            address = b.readUInt32LE(o + 4) >>> 0,
+            size = b.readUInt32LE(o + 8) >>> 0;
+        if (type !== 1 && !(type === 0 && untypedLocalData(o, section, address, size))) continue;
+        if (!section || section === 0xfff1 || !address) continue;
+        const name = cstr(str.offset + b.readUInt32LE(o));
+        if (!name || (type === 0 && name.startsWith("$"))) continue;
+        const entry = { name, address, size, ...(local && objectFile ? { objectFile } : {}) };
+        const group = groups.get(name);
+        if (!group) groups.set(name, [entry]);
+        else if (!group.some((other) => other.address === address && other.size === size)) group.push(entry);
+    }
+    return qualifySameName(groups).sort((a, z) => a.name.localeCompare(z.name));
+}
+
+// Same-named variables (statics in several .c files, ...) are all kept with the unique identity main.c::name, falling
+// back to 0x<address>::name when basenames also collide. The extension resolves both forms with full DWARF paths.
+function qualifySameName(groups) {
+    const result = [];
+    for (const [elfName, group] of groups) {
+        if (group.length === 1) {
+            result.push(group[0]);
+            continue;
+        }
+        const used = new Set();
+        for (const symbol of group) {
+            const file = symbol.objectFile || "";
+            const unique =
+                /^[\w.+~-]{0,512}\.[A-Za-z0-9_+]+$/.test(file) &&
+                group.filter((other) => other.objectFile === file).length === 1;
+            const scope = unique ? file : "0x" + symbol.address.toString(16);
+            const name = scope + "::" + elfName;
+            if (used.has(name)) continue;
+            used.add(name);
+            result.push({ ...symbol, name, elfName, scope, sameNameCount: group.length });
+        }
+    }
+    return result;
+}
+
+// Variable lookup in direct --elf/--port mode: an exact identity name, or a unique file::name / 0xaddress::name match.
+// A bare name defined in several compilation units throws VARIABLE_AMBIGUOUS with the candidates instead of taking the
+// first.
+function findSymbol(symbols, requested) {
+    const direct = symbols.find((symbol) => symbol.name === requested);
+    if (direct) return direct;
+    const prefix = (SCOPE_PREFIX.exec(requested) || [""])[0];
+    const local = requested.slice(prefix.length);
+    const named = symbols.filter((symbol) => (symbol.elfName || symbol.name) === local);
+    let matches = named;
+    if (prefix) {
+        const file = prefix
+            .slice(0, -2)
+            .replace(/^['"]|['"]$/g, "")
+            .replace(/\\/g, "/");
+        matches = /^0x[0-9a-f]+$/i.test(file)
+            ? named.filter((symbol) => symbol.address === parseInt(file, 16))
+            : named.filter(
+                  (symbol) =>
+                      symbol.objectFile && (file === symbol.objectFile || file.endsWith("/" + symbol.objectFile))
+              );
+    }
+    if (matches.length === 1) return matches[0];
+    if (matches.length > 1)
+        throw Object.assign(
+            new Error(
+                `Variable name is ambiguous: ${requested} matches ${matches.length} variables in different ` +
+                    "compilation units; use one of details.candidates[].name"
+            ),
+            {
+                code: "VARIABLE_AMBIGUOUS",
+                details: {
+                    requestedName: requested,
+                    candidates: matches.map((symbol) => ({
+                        name: symbol.name,
+                        sourceFile: symbol.objectFile || "",
+                        address: `0x${symbol.address.toString(16).toUpperCase()}`,
+                        size: symbol.size
+                    }))
+                }
+            }
+        );
+    return null;
+}
+// Request parsing in direct --elf/--port mode splits names with variableSpecs like Bridge mode: neither a
+// compilation-unit prefix (main.c::x) nor :: in a C++ qualified name separates a type.
+function directRequests(symbols, variables) {
+    return (variables ? variableSpecs(variables) : []).map(({ name, type: explicit = "" }) => {
+        const symbol = findSymbol(symbols, name);
+        if (!symbol)
+            throw Object.assign(new Error(`Variable not found in ELF: ${name}`), { code: "VARIABLE_NOT_FOUND" });
+        const type = explicit || infer(symbol.size);
+        if (!TYPES.has(type))
+            throw new Error(
+                `Variable ${name} is ${symbol.size} bytes; specify a scalar type or read a member/element instead`
+            );
+        return { ...symbol, type };
+    });
+}
+function readStableElf(file) {
+    const before = fs.statSync(file);
+    const buffer = fs.readFileSync(file);
+    const after = fs.statSync(file);
+    if (before.size !== after.size || before.mtimeMs !== after.mtimeMs) {
+        throw new Error("ELF changed while being read; retry after the build finishes");
+    }
+    return {
+        buffer,
+        size: after.size,
+        mtimeMs: after.mtimeMs,
+        sha256: crypto.createHash("sha256").update(buffer).digest("hex")
+    };
+}
+function parseSymbols(file) {
+    const snapshot = readStableElf(file);
+    return { symbols: parseSymbolsBuffer(snapshot.buffer), snapshot };
+}
+
+function infer(size) {
+    return size === 1 ? "u8" : size === 2 ? "u16" : size === 4 ? "u32" : size === 8 ? "u64" : "";
+}
+function decode(values, type) {
+    const buf = Buffer.from(values.slice(0, WIDTH[type]));
+    if (buf.length < WIDTH[type]) return null;
+    if (type === "u8") return buf.readUInt8(0);
+    if (type === "i8") return buf.readInt8(0);
+    if (type === "u16") return buf.readUInt16LE(0);
+    if (type === "i16") return buf.readInt16LE(0);
+    if (type === "u32") return buf.readUInt32LE(0);
+    if (type === "i32") return buf.readInt32LE(0);
+    if (type === "f32") return buf.readFloatLE(0);
+    if (type === "u64") return Number(buf.readBigUInt64LE(0));
+    if (type === "i64") return Number(buf.readBigInt64LE(0));
+    return buf.readDoubleLE(0);
+}
+function decodeText(values, type) {
+    const buf = Buffer.from(values.slice(0, WIDTH[type]));
+    if (buf.length < WIDTH[type]) return null;
+    if (type === "u64") return buf.readBigUInt64LE(0).toString(10);
+    if (type === "i64") return buf.readBigInt64LE(0).toString(10);
+    if (type === "f64") {
+        const value = buf.readDoubleLE(0);
+        if (Number.isNaN(value)) return "NaN";
+        if (value === Infinity) return "Infinity";
+        if (value === -Infinity) return "-Infinity";
+    }
+    return null;
+}
+function memoryValues(text) {
+    return String(text)
+        .replace(/\x1a/g, " ")
+        .replace(/(^|\s)(0x)?[0-9a-f]+:/gi, " ")
+        .trim()
+        .split(/\s+/)
+        .flatMap((t) => {
+            const value = /^0x[0-9a-f]+$/i.test(t) ? parseInt(t, 16) : /^\d+$/.test(t) ? parseInt(t, 10) : NaN;
+            return Number.isInteger(value) && value >= 0 && value <= 255 ? [value] : [];
+        });
+}
+
+function summarize(points) {
+    if (!points.length) return { samples: 0, direction: "unknown" };
+    const valid = points.filter((point) => Number.isFinite(point.value));
+    const values = valid.map((point) => point.value);
+    if (!values.length) return { samples: points.length, direction: "unknown" };
+    const first = values[0],
+        last = values[values.length - 1];
+    const min = Math.min(...values),
+        max = Math.max(...values);
+    const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+    const t0 = valid[0].timestamp;
+    const xs = valid.map((point) => (point.timestamp - t0) / 1000);
+    const xMean = xs.reduce((sum, value) => sum + value, 0) / xs.length;
+    let numerator = 0,
+        denominator = 0,
+        turns = 0,
+        previousSign = 0;
+    for (let i = 0; i < values.length; i++) {
+        numerator += (xs[i] - xMean) * (values[i] - mean);
+        denominator += (xs[i] - xMean) ** 2;
+        if (i) {
+            const sign = Math.sign(values[i] - values[i - 1]);
+            if (sign && previousSign && sign !== previousSign) turns++;
+            if (sign) previousSign = sign;
+        }
+    }
+    const slopePerSecond = denominator ? numerator / denominator : 0;
+    const span = max - min;
+    const tolerance = Math.max(Math.abs(mean) * 0.001, 1e-9);
+    let direction = "stable";
+    if (turns >= Math.max(2, Math.floor(values.length / 3)) && span > tolerance * 2) direction = "volatile";
+    else if (Math.abs(last - first) > tolerance) direction = slopePerSecond > 0 ? "rising" : "falling";
+    return {
+        samples: points.length,
+        validSamples: valid.length,
+        first,
+        last,
+        min,
+        max,
+        mean,
+        delta: last - first,
+        percentChange: first === 0 ? null : ((last - first) / Math.abs(first)) * 100,
+        slopePerSecond,
+        direction
+    };
+}
+
+class Tcl {
+    constructor(port) {
+        this.port = port;
+        this.socket = null;
+        this.pending = "";
+        this.queue = [];
+    }
+    connect() {
+        return new Promise((resolve, reject) => {
+            const s = (this.socket = net.connect({ host: "127.0.0.1", port: this.port }));
+            const timer = setTimeout(() => {
+                s.destroy();
+                reject(new Error("Tcl connection timeout"));
+            }, 5000);
+            const onConnect = () => {
+                clearTimeout(timer);
+                s.removeListener("error", onInitialError);
+                resolve(undefined);
+            };
+            const onInitialError = (error) => {
+                clearTimeout(timer);
+                s.removeListener("connect", onConnect);
+                reject(error);
+            };
+            s.setNoDelay(true);
+            s.once("connect", onConnect);
+            s.once("error", onInitialError);
+            s.on("error", (error) => {
+                while (this.queue.length) this.queue.shift().reject(error);
+            });
+            s.on("data", (chunk) => {
+                this.pending += chunk.toString("latin1");
+                let i;
+                while ((i = this.pending.indexOf("\x1a")) >= 0) {
+                    const value = this.pending.slice(0, i);
+                    this.pending = this.pending.slice(i + 1);
+                    const q = this.queue.shift();
+                    if (q) q.resolve(value);
+                }
+            });
+            s.on("close", () => {
+                while (this.queue.length) this.queue.shift().reject(new Error("Tcl connection closed"));
+            });
+        });
+    }
+    command(text) {
+        return new Promise((resolve, reject) => {
+            const item = { resolve, reject };
+            const timer = setTimeout(() => {
+                this.socket.destroy();
+                reject(new Error("Tcl response timeout"));
+            }, 2000);
+            item.resolve = (value) => {
+                clearTimeout(timer);
+                resolve(value);
+            };
+            item.reject = (error) => {
+                clearTimeout(timer);
+                reject(error);
+            };
+            this.queue.push(item);
+            this.socket.write(text + "\x1a");
+        });
+    }
+    close() {
+        if (this.socket) this.socket.destroy();
+    }
+}
+
+function workspaceOutputPath(workspace, requested) {
+    const raw = String(requested || "").trim();
+    if (!raw || path.isAbsolute(raw)) {
+        throw Object.assign(new Error("--output must be a relative path inside the workspace"), {
+            code: "PATH_OUTSIDE_WORKSPACE"
+        });
+    }
+    const root = fs.realpathSync(path.resolve(workspace));
+    const output = path.resolve(root, raw);
+    const relative = path.relative(root, output);
+    if (!relative || leavesDirectory(relative)) {
+        throw Object.assign(new Error("--output must be a relative path inside the workspace"), {
+            code: "PATH_OUTSIDE_WORKSPACE"
+        });
+    }
+    let ancestor = path.dirname(output);
+    while (!fs.existsSync(ancestor)) {
+        const parent = path.dirname(ancestor);
+        if (parent === ancestor) break;
+        ancestor = parent;
+    }
+    const ancestorRelative = path.relative(root, fs.realpathSync(ancestor));
+    if (leavesDirectory(ancestorRelative)) {
+        throw Object.assign(new Error("--output resolves through a symlink outside the workspace"), {
+            code: "PATH_OUTSIDE_WORKSPACE"
+        });
+    }
+    return output;
+}
+
+function csvCell(value) {
+    const text = value === null || value === undefined ? "" : String(value);
+    return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+// Scalar leaves of a read tree with their path below the tree root (".x", "[3].pos.y"); members or elements that cannot
+// be observed have no value and are left out. valueText keeps 64-bit values exact.
+function treeLeaves(node, prefix = "", out = []) {
+    if (!node) return out;
+    if (Array.isArray(node.members))
+        for (const member of node.members) treeLeaves(member, `${prefix}.${member.name}`, out);
+    else if (Array.isArray(node.elements))
+        for (const element of node.elements) treeLeaves(element, `${prefix}[${element.index}]`, out);
+    else if ("value" in node) out.push({ path: prefix, type: node.type || "", value: node.valueText ?? node.value });
+    return out;
+}
+
+// One variables.read result as CSV. A single requested array becomes a table with one row per element: "index" plus
+// one column per scalar leaf (value, or member paths such as pos.x for struct arrays), ready for a spreadsheet.
+// Anything else becomes one row per scalar: variable,path,type,value. BOM and CRLF match the chart history export.
+function snapshotCsv(result, requestedNames) {
+    const csvText = (lines) => "﻿" + lines.join("\r\n") + "\r\n";
+    const values = result?.values || {};
+    const only = requestedNames.length === 1 ? values[requestedNames[0]] : null;
+    if (only?.tree?.kind === "array") {
+        const columns = [];
+        const rows = (only.tree.elements || []).map((element) => {
+            const row = new Map();
+            const leaves =
+                "value" in element
+                    ? [{ path: "value", value: element.valueText ?? element.value }]
+                    : treeLeaves(element).map((leaf) => ({ ...leaf, path: leaf.path.replace(/^\./, "") }));
+            for (const leaf of leaves) {
+                if (!columns.includes(leaf.path)) columns.push(leaf.path);
+                row.set(leaf.path, leaf.value);
+            }
+            return [element.index, row];
+        });
+        const lines = [["index", ...columns].map(csvCell).join(",")];
+        for (const [index, row] of rows)
+            lines.push([index, ...columns.map((column) => row.get(column))].map(csvCell).join(","));
+        return { format: "table", rows: rows.length, csv: csvText(lines) };
+    }
+    const lines = [["variable", "path", "type", "value"].join(",")];
+    for (const name of requestedNames) {
+        const item = values[name];
+        if (!item) continue;
+        const leaves = item.tree
+            ? treeLeaves(item.tree)
+            : [{ path: "", type: item.type, value: item.valueText ?? item.value }];
+        for (const leaf of leaves) lines.push([name, name + leaf.path, leaf.type, leaf.value].map(csvCell).join(","));
+    }
+    return { format: "long", rows: lines.length - 1, csv: csvText(lines) };
+}
+
+async function main() {
+    const opt = args(process.argv.slice(2));
+    const workspace = path.resolve(opt.workspace || process.cwd());
+    if (opt["json-array"] && !opt.list) throw new Error("--json-array can only be combined with --list");
+    if (opt["export-csv"]) {
+        const variables = opt.variables ? variableSpecs(opt.variables).map((item) => item.name) : [];
+        const range = exportRange(opt);
+        const params = { variables, to: range.to };
+        if (range.from !== undefined) params.from = range.from;
+        if (opt.panel !== undefined) params.panelId = boundedInteger(opt.panel, 1, 1, 1000, "--panel");
+        const rangeDetails = exportRangeDetails(opt, range);
+        let result;
+        try {
+            result = await call(workspace, "variables.exportCsv", params);
+        } catch (error) {
+            error.details = { ...(error.details || {}), requestedRange: rangeDetails };
+            if (rangeDetails.bareClockUsesLocalTime) {
+                error.likelyCause = `Bare HH:MM[:SS] was interpreted in ${rangeDetails.localTimeZone} (${rangeDetails.localUtcOffset}), while chart timestamps are UTC.`;
+                error.suggestedActions = [
+                    "Retry with --last for a relative range, or pass full ISO 8601 UTC timestamps ending in Z.",
+                    `Use details.requestedRange.resolvedUtc to verify the actual interval before retrying.`
+                ];
+            }
+            throw error;
+        }
+        if (opt.output) {
+            const output = workspaceOutputPath(workspace, opt.output);
+            fs.mkdirSync(path.dirname(output), { recursive: true });
+            fs.writeFileSync(output, String(result.csv || ""), "utf8");
+            const metadata = { ...result };
+            delete metadata.csv;
+            process.stdout.write(
+                stringify({ type: "csvExport", ...metadata, requestedRange: rangeDetails, output }) + "\n"
+            );
+        } else {
+            process.stdout.write(stringify({ type: "csvExport", ...result, requestedRange: rangeDetails }) + "\n");
+        }
+        return;
+    }
+    if (opt["snapshot-csv"]) {
+        if (!opt.output) throw new Error("--snapshot-csv requires --output <relative path>");
+        if (opt.elf || opt.port || opt.list || opt.trend || opt.count !== undefined || opt["add-to"])
+            throw new Error(
+                "--snapshot-csv reads once through EmberProbe; combine it only with --variables and --output"
+            );
+        const variables = variableSpecs(opt.variables);
+        const output = workspaceOutputPath(workspace, opt.output);
+        const result = withVariableErrors(await call(workspace, "variables.read", { variables }), "variables.read");
+        const { csv, ...table } = snapshotCsv(
+            result,
+            variables.map((item) => item.name)
+        );
+        fs.mkdirSync(path.dirname(output), { recursive: true });
+        fs.writeFileSync(output, csv, "utf8");
+        const metadata = { ...result };
+        delete metadata.values;
+        process.stdout.write(stringify({ type: "snapshotCsv", ...metadata, ...table, output }) + "\n");
+        return;
+    }
+    let bridgeVariables = null;
+    if (!opt.list && !opt.elf && !opt.port && opt["add-to"]) {
+        bridgeVariables = variableSpecs(opt.variables);
+        const destination = opt["add-to"];
+        const types = Object.fromEntries(
+            bridgeVariables.filter((item) => item.type).map((item) => [item.name, item.type])
+        );
+        const added = await call(workspace, "watch.add", {
+            variables: bridgeVariables.map((item) => item.name),
+            types,
+            destination
+        });
+        if (!opt.read && !opt.trend && opt.count === undefined) {
+            process.stdout.write(stringify({ type: "watchUpdate", destination, ...added }) + "\n");
+            return;
+        }
+    }
+    // Trend reads also go through the extension Bridge: they reuse the connection while sampling, otherwise the
+    // extension starts OpenOCD temporarily and reports start, progress and shutdown in the sidebar. Only a summary is
+    // printed to save agent tokens.
+    if (opt.trend && !opt.elf && !opt.port) {
+        const variables = bridgeVariables || variableSpecs(opt.variables);
+        if (!variables.length) throw new Error("Pass --variables name[:type],...");
+        const count = boundedInteger(opt.count, 10, 2, 1000, "--count");
+        const intervalMs = boundedInteger(opt.interval, 200, 5, 60000, "--interval");
+        const result = await call(
+            workspace,
+            "variables.sample",
+            {
+                variables,
+                count,
+                intervalMs
+            },
+            Math.min(2147483647, count * intervalMs + 30000)
+        );
+        const series = {};
+        for (const sample of result.samples || []) {
+            for (const [name, item] of Object.entries(sample.values || {})) {
+                (series[name] ||= []).push({ timestamp: sample.timestamp, value: item.value });
+            }
+        }
+        const latest = result.samples?.length ? result.samples[result.samples.length - 1].values : {};
+        const { partial, variableErrors } = withVariableErrors(result, "variables.trend");
+        process.stdout.write(
+            stringify({
+                type: "trend",
+                source: result.source,
+                elf: result.elf,
+                sampleCount: result.samples?.length || 0,
+                latest,
+                trends: Object.fromEntries(Object.entries(series).map(([name, points]) => [name, summarize(points)])),
+                ...(partial ? { partial, variableErrors } : {})
+            }) + "\n"
+        );
+        return;
+    }
+    if (opt.count !== undefined && !opt.list && !opt.elf && !opt.port) {
+        const variables = bridgeVariables || variableSpecs(opt.variables);
+        const count = boundedInteger(opt.count, 1, 1, 1000, "--count");
+        const intervalMs = boundedInteger(opt.interval, 200, 5, 60000, "--interval");
+        const result = await call(
+            workspace,
+            "variables.sample",
+            {
+                variables,
+                count,
+                intervalMs
+            },
+            Math.min(2147483647, count * intervalMs + 30000)
+        );
+        const { partial, variableErrors } = withVariableErrors(result, "variables.read");
+        if (partial) process.stdout.write(stringify({ type: "variableErrors", partial, variableErrors }) + "\n");
+        for (const sample of result.samples || []) {
+            process.stdout.write(
+                stringify({ type: "sample", source: result.source, elf: result.elf, ...sample }) + "\n"
+            );
+        }
+        return;
+    }
+    // The common path needs only variable names: the extension infers types from the latest ELF/DWARF and either reuses
+    // the sampling connection or starts the probe for one read. --add-to must use this path too: pass only types the
+    // user gave explicitly; without a suffix the extension uses DWARF instead of guessing from the symbol width.
+    if (!opt.list && !opt.trend && opt.count === undefined && !opt.elf && !opt.port) {
+        const variables = bridgeVariables || variableSpecs(opt.variables);
+        const result = await call(workspace, "variables.read", { variables });
+        process.stdout.write(stringify({ type: "sample", ...withVariableErrors(result, "variables.read") }) + "\n");
+        return;
+    }
+    const selectedElf = opt.elf || newestElf(workspace);
+    if (!selectedElf) throw new Error("No ELF found; pass --elf or --workspace");
+    const elf = path.resolve(selectedElf);
+    if (!fs.existsSync(elf)) throw new Error(`ELF does not exist: ${elf}`);
+    const parsed = parseSymbols(elf);
+    const symbols = parsed.symbols;
+    const snapshot = parsed.snapshot;
+    if (opt.list) {
+        process.stdout.write(listOutput({ elf, snapshot, symbols }, opt["json-array"]));
+        return;
+    }
+    const requested = directRequests(symbols, opt.variables);
+    if (!requested.length) throw new Error("Pass --variables name[:type],...");
+    if (opt["add-to"]) {
+        const destination = opt["add-to"];
+        const types = Object.fromEntries(requested.map((item) => [item.name, item.type]));
+        const added = await call(workspace, "watch.add", {
+            variables: requested.map((item) => item.name),
+            types,
+            destination
+        });
+        process.stdout.write(stringify({ type: "watchUpdate", destination, ...added }) + "\n");
+        if (!opt.read && !opt.trend && opt.count === undefined) return;
+    }
+    const tcl = new Tcl(boundedInteger(opt.port, 6666, 1, 65535, "--port"));
+    try {
+        await tcl.connect();
+        const count = boundedInteger(opt.count, opt.trend ? 10 : 1, 1, 1000000, "--count");
+        const interval = boundedInteger(opt.interval, 200, 20, 60000, "--interval");
+        const series = Object.fromEntries(requested.map((item) => [item.name, []]));
+        for (let sample = 0; sample < count; sample++) {
+            const current = fs.statSync(elf);
+            if (current.size !== snapshot.size || current.mtimeMs !== snapshot.mtimeMs) {
+                const error = Object.assign(
+                    new Error("ELF changed during sampling; start a new sampling run to rebind variable addresses"),
+                    { code: "ELF_CHANGED" }
+                );
+                throw error;
+            }
+            const timestamp = Date.now(),
+                values = {};
+            for (const v of requested) {
+                const suffix = `0x${v.address.toString(16)} 8 ${WIDTH[v.type]}`;
+                let raw = await tcl.command(`ocd_read_memory ${suffix}`),
+                    bytes = memoryValues(raw);
+                if (bytes.length < WIDTH[v.type]) {
+                    raw = await tcl.command(`read_memory ${suffix}`);
+                    bytes = memoryValues(raw);
+                }
+                values[v.name] = {
+                    value: decode(bytes, v.type),
+                    valueText: decodeText(bytes, v.type),
+                    type: v.type,
+                    address: `0x${v.address.toString(16)}`
+                };
+                series[v.name].push({ timestamp, value: values[v.name].value });
+            }
+            process.stdout.write(
+                stringify({
+                    type: "sample",
+                    elf,
+                    elfSha256: snapshot.sha256,
+                    elfMtimeMs: snapshot.mtimeMs,
+                    timestamp,
+                    values
+                }) + "\n"
+            );
+            if (sample + 1 < count) await new Promise((resolve) => setTimeout(resolve, interval));
+        }
+        if (opt.trend) {
+            process.stdout.write(
+                stringify({
+                    type: "trend",
+                    elf,
+                    elfSha256: snapshot.sha256,
+                    trends: Object.fromEntries(
+                        Object.entries(series).map(([name, points]) => [name, summarize(points)])
+                    )
+                }) + "\n"
+            );
+        }
+    } finally {
+        tcl.close();
+    }
+}
+
+if (require.main === module)
+    main().catch((error) => {
+        const argv = process.argv.slice(2);
+        const operation = argv.includes("--export-csv")
+            ? "variables.exportCsv"
+            : argv.includes("--trend")
+              ? "variables.trend"
+              : argv.includes("--list")
+                ? "variables.list"
+                : "variables.read";
+        writeDiagnostic(error, { operation });
+        process.exitCode = 1;
+    });
+module.exports = {
+    args,
+    boundedInteger,
+    parseTimestamp,
+    exportRange,
+    exportRangeDetails,
+    variableSpecs,
+    parseSymbolsBuffer,
+    findSymbol,
+    directRequests,
+    memoryValues,
+    decode,
+    decodeText,
+    infer,
+    listOutput,
+    readStableElf,
+    snapshotCsv,
+    summarize,
+    stringify,
+    workspaceOutputPath,
+    withVariableErrors
+};

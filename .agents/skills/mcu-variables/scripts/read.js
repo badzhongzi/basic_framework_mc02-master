@@ -23,7 +23,14 @@ function args(argv) {
         const key = argv[i];
         if (!key.startsWith("--")) throw new Error(`Unexpected argument: ${key}`);
         const name = key.slice(2);
-        if (name === "list" || name === "trend" || name === "read" || name === "export-csv" || name === "json-array")
+        if (
+            name === "list" ||
+            name === "trend" ||
+            name === "read" ||
+            name === "export-csv" ||
+            name === "snapshot-csv" ||
+            name === "json-array"
+        )
             out[name] = true;
         else {
             const value = argv[++i];
@@ -34,15 +41,15 @@ function args(argv) {
     return out;
 }
 
-// 部分变量失败时扩展仍返回其余变量，并附 variableErrors；补全为结构化诊断后输出，
-// 让 Agent 逐项判断原因，而不是把整批视为失败。
+// When some variables fail the extension still returns the others with variableErrors; each is completed into a
+// structured diagnostic so agents judge every item instead of failing the whole batch.
 function withVariableErrors(result, operation) {
     if (!Array.isArray(result?.variableErrors) || !result.variableErrors.length) return result;
     return { ...result, partial: true, variableErrors: variableErrorDiagnostics(result, { operation }) };
 }
 
-// --list 默认输出 NDJSON：每个符号一行 JSON，且每行都重复 elf/elfSha256/elfMtimeMs；
-// --json-array 改为单个 JSON 对象 { elf, elfSha256, elfMtimeMs, symbols: [...] }，便于 JSON.parse(stdout)。
+// --list prints NDJSON by default: one JSON symbol per line, each repeating elf/elfSha256/elfMtimeMs. --json-array
+// prints a single object { elf, elfSha256, elfMtimeMs, symbols: [...] } for JSON.parse(stdout).
 function listOutput({ elf, snapshot, symbols }, jsonArray = false) {
     const binding = { elf, elfSha256: snapshot.sha256, elfMtimeMs: snapshot.mtimeMs };
     const entries = symbols.map((symbol) => ({
@@ -124,7 +131,8 @@ function exportRangeDetails(opt, range) {
     };
 }
 
-// 编译单元限定前缀：'dir/main.c'::、"main.c"::、main.c::、src/main.c:: 或 0x2000abcd::（与扩展的解析规则一致）。
+// Compilation-unit prefix: 'dir/main.c'::, "main.c"::, main.c::, src/main.c:: or 0x2000abcd:: (the extension's parsing
+// rules).
 const SCOPE_PREFIX =
     /^(?:'[^'\x00-\x1f]{1,1024}'|"[^"\x00-\x1f]{1,1024}"|[\w.+~/\\-]{0,512}\.[A-Za-z0-9_+]+|0x[0-9a-fA-F]{1,8})::(?=[A-Za-z_])/;
 
@@ -134,16 +142,16 @@ function variableSpecs(value) {
         .filter(Boolean)
         .map((raw) => {
             const trimmed = raw.trim();
-            // 编译单元前缀里的 '.'、':' 不属于成员路径或类型后缀。
+            // '.' and ':' inside a compilation-unit prefix belong to neither a member path nor a type suffix.
             const prefix = (SCOPE_PREFIX.exec(trimmed) || [""])[0].length;
             const rest = trimmed.slice(prefix);
-            // 路径语法（结构体成员 sensor.x / 数组元素 buf[0] / 范围 buf[1:5] / 全部 buf[*]）
-            // 类型由扩展侧按 DWARF 布局推断，整体作为变量名传递，不再按 ':' 拆分类型。
+            // Path syntax (member sensor.x, element buf[0], range buf[1:5], all buf[*]) is passed whole as the variable
+            // name; the extension infers the type from the DWARF layout, so ':' is not split off as a type.
             if (rest.includes("[") || rest.includes(".")) {
                 if (!trimmed) throw new Error("Variable name is required");
                 return { name: trimmed };
             }
-            // C++ 限定名中的 :: 是名字的一部分，只有单个冒号才分隔显式类型。
+            // In C++ qualified names :: is part of the name; only a single colon introduces an explicit type.
             const lastColon = trimmed.lastIndexOf(":");
             const split = lastColon > prefix && trimmed[lastColon - 1] !== ":" ? lastColon : -1;
             const name = (split > 0 ? trimmed.slice(0, split) : trimmed).trim();
@@ -212,8 +220,8 @@ function parseSymbolsBuffer(buffer) {
         while (e < endLimit && b[e]) e++;
         return e < endLimit ? b.toString("utf8", p, e) : "";
     };
-    // 与扩展一致：GCC -O0 且无 -fdata-sections 时 .bss 中的 static 是 NOTYPE LOCAL，
-    // 只接纳有尺寸且完整落在可写已分配节（SHF_WRITE|SHF_ALLOC）内的此类符号。
+    // As in the extension: with GCC -O0 and no -fdata-sections, statics in .bss are NOTYPE LOCAL; such symbols are
+    // accepted only if sized and entirely inside a writable allocated section (SHF_WRITE|SHF_ALLOC).
     const untypedLocalData = (o, section, address, size) => {
         const owner = sections[section];
         return (
@@ -225,7 +233,8 @@ function parseSymbolsBuffer(buffer) {
             address + size <= owner.addr + owner.size
         );
     };
-    // STT_FILE 标记其后局部符号所属的源文件（basename），用于区分不同编译单元中的同名 static。
+    // STT_FILE marks the source file (basename) of the local symbols that follow, distinguishing same-named statics in
+    // different compilation units.
     let objectFile = "";
     for (let o = sym.offset; o + 16 <= Math.min(b.length, sym.offset + sym.size); o += ent) {
         const type = b[o + 12] & 15;
@@ -249,8 +258,8 @@ function parseSymbolsBuffer(buffer) {
     return qualifySameName(groups).sort((a, z) => a.name.localeCompare(z.name));
 }
 
-// 同名变量（各 .c 中的 static 等）全部保留，按 STT_FILE 给出唯一身份 main.c::name；
-// 源文件 basename 也重名时退回 0x<地址>::name。扩展侧按 DWARF 完整路径解析这两种写法。
+// Same-named variables (statics in several .c files, ...) are all kept with the unique identity main.c::name, falling
+// back to 0x<address>::name when basenames also collide. The extension resolves both forms with full DWARF paths.
 function qualifySameName(groups) {
     const result = [];
     for (const [elfName, group] of groups) {
@@ -274,8 +283,9 @@ function qualifySameName(groups) {
     return result;
 }
 
-// 直接 --elf/--port 模式的变量查找：身份名精确匹配，或 文件名::变量名 / 0x地址::变量名 唯一匹配。
-// 同名多编译单元的裸名抛 VARIABLE_AMBIGUOUS 并列出候选，不得默认取第一项。
+// Variable lookup in direct --elf/--port mode: an exact identity name, or a unique file::name / 0xaddress::name match.
+// A bare name defined in several compilation units throws VARIABLE_AMBIGUOUS with the candidates instead of taking the
+// first.
 function findSymbol(symbols, requested) {
     const direct = symbols.find((symbol) => symbol.name === requested);
     if (direct) return direct;
@@ -317,8 +327,8 @@ function findSymbol(symbols, requested) {
         );
     return null;
 }
-// 直接 --elf/--port 模式的请求解析：与 Bridge 模式共用 variableSpecs 的拆分规则，
-// 编译单元前缀（main.c::x）与 C++ 限定名中的 :: 都不是类型分隔符。
+// Request parsing in direct --elf/--port mode splits names with variableSpecs like Bridge mode: neither a
+// compilation-unit prefix (main.c::x) nor :: in a C++ qualified name separates a type.
 function directRequests(symbols, variables) {
     return (variables ? variableSpecs(variables) : []).map(({ name, type: explicit = "" }) => {
         const symbol = findSymbol(symbols, name);
@@ -539,6 +549,61 @@ function workspaceOutputPath(workspace, requested) {
     return output;
 }
 
+function csvCell(value) {
+    const text = value === null || value === undefined ? "" : String(value);
+    return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+// Scalar leaves of a read tree with their path below the tree root (".x", "[3].pos.y"); members or elements that cannot
+// be observed have no value and are left out. valueText keeps 64-bit values exact.
+function treeLeaves(node, prefix = "", out = []) {
+    if (!node) return out;
+    if (Array.isArray(node.members))
+        for (const member of node.members) treeLeaves(member, `${prefix}.${member.name}`, out);
+    else if (Array.isArray(node.elements))
+        for (const element of node.elements) treeLeaves(element, `${prefix}[${element.index}]`, out);
+    else if ("value" in node) out.push({ path: prefix, type: node.type || "", value: node.valueText ?? node.value });
+    return out;
+}
+
+// One variables.read result as CSV. A single requested array becomes a table with one row per element: "index" plus
+// one column per scalar leaf (value, or member paths such as pos.x for struct arrays), ready for a spreadsheet.
+// Anything else becomes one row per scalar: variable,path,type,value. BOM and CRLF match the chart history export.
+function snapshotCsv(result, requestedNames) {
+    const csvText = (lines) => "﻿" + lines.join("\r\n") + "\r\n";
+    const values = result?.values || {};
+    const only = requestedNames.length === 1 ? values[requestedNames[0]] : null;
+    if (only?.tree?.kind === "array") {
+        const columns = [];
+        const rows = (only.tree.elements || []).map((element) => {
+            const row = new Map();
+            const leaves =
+                "value" in element
+                    ? [{ path: "value", value: element.valueText ?? element.value }]
+                    : treeLeaves(element).map((leaf) => ({ ...leaf, path: leaf.path.replace(/^\./, "") }));
+            for (const leaf of leaves) {
+                if (!columns.includes(leaf.path)) columns.push(leaf.path);
+                row.set(leaf.path, leaf.value);
+            }
+            return [element.index, row];
+        });
+        const lines = [["index", ...columns].map(csvCell).join(",")];
+        for (const [index, row] of rows)
+            lines.push([index, ...columns.map((column) => row.get(column))].map(csvCell).join(","));
+        return { format: "table", rows: rows.length, csv: csvText(lines) };
+    }
+    const lines = [["variable", "path", "type", "value"].join(",")];
+    for (const name of requestedNames) {
+        const item = values[name];
+        if (!item) continue;
+        const leaves = item.tree
+            ? treeLeaves(item.tree)
+            : [{ path: "", type: item.type, value: item.valueText ?? item.value }];
+        for (const leaf of leaves) lines.push([name, name + leaf.path, leaf.type, leaf.value].map(csvCell).join(","));
+    }
+    return { format: "long", rows: lines.length - 1, csv: csvText(lines) };
+}
+
 async function main() {
     const opt = args(process.argv.slice(2));
     const workspace = path.resolve(opt.workspace || process.cwd());
@@ -578,6 +643,26 @@ async function main() {
         }
         return;
     }
+    if (opt["snapshot-csv"]) {
+        if (!opt.output) throw new Error("--snapshot-csv requires --output <relative path>");
+        if (opt.elf || opt.port || opt.list || opt.trend || opt.count !== undefined || opt["add-to"])
+            throw new Error(
+                "--snapshot-csv reads once through EmberProbe; combine it only with --variables and --output"
+            );
+        const variables = variableSpecs(opt.variables);
+        const output = workspaceOutputPath(workspace, opt.output);
+        const result = withVariableErrors(await call(workspace, "variables.read", { variables }), "variables.read");
+        const { csv, ...table } = snapshotCsv(
+            result,
+            variables.map((item) => item.name)
+        );
+        fs.mkdirSync(path.dirname(output), { recursive: true });
+        fs.writeFileSync(output, csv, "utf8");
+        const metadata = { ...result };
+        delete metadata.values;
+        process.stdout.write(stringify({ type: "snapshotCsv", ...metadata, ...table, output }) + "\n");
+        return;
+    }
     let bridgeVariables = null;
     if (!opt.list && !opt.elf && !opt.port && opt["add-to"]) {
         bridgeVariables = variableSpecs(opt.variables);
@@ -595,8 +680,9 @@ async function main() {
             return;
         }
     }
-    // 趋势读取同样走扩展桥：已有采样时复用连接；未采样时由扩展临时启动
-    // OpenOCD，并把启动、进度和关闭状态同步到侧边栏。只输出汇总，减少 Agent token。
+    // Trend reads also go through the extension Bridge: they reuse the connection while sampling, otherwise the
+    // extension starts OpenOCD temporarily and reports start, progress and shutdown in the sidebar. Only a summary is
+    // printed to save agent tokens.
     if (opt.trend && !opt.elf && !opt.port) {
         const variables = bridgeVariables || variableSpecs(opt.variables);
         if (!variables.length) throw new Error("Pass --variables name[:type],...");
@@ -656,9 +742,9 @@ async function main() {
         }
         return;
     }
-    // 最常见路径只需变量名：扩展自动从最新 ELF/DWARF 推断类型，并选择复用
-    // 当前采样连接或临时启动探针读取一次。--add-to 也必须走此路径：
-    // 只传用户显式指定的类型，无后缀时由扩展使用 DWARF，不得按符号宽度猜测。
+    // The common path needs only variable names: the extension infers types from the latest ELF/DWARF and either reuses
+    // the sampling connection or starts the probe for one read. --add-to must use this path too: pass only types the
+    // user gave explicitly; without a suffix the extension uses DWARF instead of guessing from the symbol width.
     if (!opt.list && !opt.trend && opt.count === undefined && !opt.elf && !opt.port) {
         const variables = bridgeVariables || variableSpecs(opt.variables);
         const result = await call(workspace, "variables.read", { variables });
@@ -780,6 +866,7 @@ module.exports = {
     infer,
     listOutput,
     readStableElf,
+    snapshotCsv,
     summarize,
     stringify,
     workspaceOutputPath,

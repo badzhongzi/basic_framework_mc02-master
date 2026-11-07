@@ -1,0 +1,164 @@
+# EmberProbe Agent Workflow (shared reference)
+
+Shared operating rules for every EmberProbe MCU skill. Load this document only when the
+current operation needs it — usually when a command fails, when a request spans several
+skills, or when you are about to report a result. Skill-specific authorization prompts and
+hardware constraints stay in each `SKILL.md`; this file covers the cross-skill contract only.
+
+All EmberProbe skill scripts talk to the extension through a local Agent Bridge and report
+failures as a single JSON `diagnostic` on stderr:
+
+```json
+{ "ok": false, "type": "diagnostic", "operation": "config.get",
+  "error": { "code": "BRIDGE_TIMEOUT", "category": "extension", "stage": "request",
+    "message": "...", "likelyCause": "...", "retryable": false,
+    "suggestedActions": ["..."], "details": { "method": "config.get", "timeoutMs": 20000, "elapsedMs": 20001, "resultUnknown": true } } }
+```
+
+Always read `error.code`, `retryable`, and `details` before deciding what to do next. The
+extension's own `likelyCause`/`suggestedActions` (when present) are more specific than any
+generic guess and take priority. `error.actions` lists the Bridge methods those suggestions
+refer to (for example `{ "method": "debug.start" }`); the same method is reachable through the
+matching skill script or MCP tool.
+
+## Failure handling
+
+The user may enable **Allow all Agent operations** in the EmberProbe sidebar's Agent Configuration card.
+When the Bridge reports `mode: "full"` with `authorized: true` or `confirmationRequired: false`,
+use that explicit workspace grant without asking for a second approval or manufacturing a confirmation ID.
+Never enable this setting yourself, infer it from the task, or bypass a returned confirmation request.
+Probe ownership, target identity, firmware consistency and input checks still apply. Anonymous probes
+retain one-time-only Flash/variable-write permission, and a mismatched ELF still requires write confirmation.
+
+
+When `confirmationRequired` is true, confirm sensitive Bridge operations in the Agent conversation. Show the returned concrete
+plan and wait for the human's answer before submitting its confirmation ID. Flash programming,
+variable/peripheral writes, CubeMX generation, and Flash verification that temporarily halts
+the target use plan-bound IDs; EmberProbe does not show a second operation approval dialog.
+Pass `remember` only when the human explicitly chooses the documented 24-hour permission.
+Honor the returned `choices`: a probe without a reliable USB serial permits `once` only,
+even when the user previously granted workspace write trust. Its confirmation binds the
+current physical attachment; unplug/replug requires a fresh plan and confirmation. If the
+OS cannot establish an attachment identity, writes fail with `PROBE_IDENTITY_UNVERIFIED`.
+Do not turn a Windows instance-ID tail into `--probe-serial`: it may differ from the USB
+descriptor (for example, `ATK_20190528` versus `ATK 20190528`). Use the explicitly supplied
+USB serial or leave it empty for a uniquely matched probe. Network backends are configured
+in the trusted interface script and do not require a local USB probe.
+An empty serial resolves in this order: a serial in the interface script, the workspace's
+selected probe (`config.get` → `selectedProbe` with `source: "user"`: the probe the user picked in
+the sidebar), then a unique connected probe. `probe.list` marks that device with `selected: true`;
+only the user changes the selection, in the sidebar. A selected probe that is not connected is
+reported as not found; it is never replaced by another device, so ask the user instead.
+Without a pick the workspace is in automatic mode (`selectedProbe` absent, or `source` `"auto"` /
+`"success"` without a serial): several probes of one type are told apart by their target chip, and
+`PROBE_SELECTION_REQUIRED` means the user must pick one under **Connected probes** in the sidebar.
+`PROBE_TARGET_MISMATCH` means the chip on the probe differs from the one automatic mode recorded;
+the operation did not run. Do not retry or work around it; ask the user to check the board and, if
+it is the intended one, click **Use this chip** in the sidebar.
+The Bridge validates the ID and current plan; it does not independently attest that a chat
+answer came from a human. A returned ID alone is never permission for the Agent to execute.
+Denial ends the operation; do not substitute a direct CLI call or retry automatically.
+
+Custom or modified installed skill contents are checked before Bridge calls and require a
+separate UI decision for their current hashes. Changing them invalidates that decision.
+The Bridge rejects calls from an untrusted workspace. Tokens and loopback binding do not
+isolate mutually hostile processes running as the same OS user; OpenOCD Tcl remains a trusted
+local-process interface. Automatically selected Tcl ports no longer fall back to 6666.
+
+For `PROBE_EXIT_UNCONFIRMED` or `CUBEMX_EXIT_UNCONFIRMED`, report the retained ownership and
+retry the appropriate stop/cancel operation only as cleanup. Do not start a competing task,
+delete staging files, or infer that an error response means the device/project is idle.
+
+Follow this order for every failure. Do not skip steps and do not substitute a guess for evidence.
+
+1. **Record** the operation, `error.code`, `error.stage`, and the relevant `details` (method,
+   timeout budget, elapsed time, invalid targets, OpenOCD tail, etc.).
+2. **Separate fact from assumption.** State what the diagnostic proves (e.g. "no response
+   within the 20 s transport budget") apart from what it does not (e.g. the actual target state).
+3. **Check the relevant state** with a read-only call before acting — for example `debug.status`
+   after a control timeout, `config.get` after a config timeout, `peripherals.read` after a write.
+4. **Retry only when allowed.** Retry is permitted only if a precondition changed or the
+   diagnostic marks the operation `retryable` (see Retry policy). Never retry to "see if it works".
+
+Never invent a root cause the diagnostic does not support. Do not claim a probe is busy, a
+target is disconnected, an SVD caused a crash, or GDB is missing unless a specific code or
+`details` field says so. An unavailable configuration or a missing detection tool is **not**
+evidence that hardware is disconnected.
+
+## Retry policy
+
+- **Read-only calls** (`config.get`, `chip.read`, `fault.read`, `elf.analyze`, `peripherals.list`,
+  `peripherals.read`, `debug.status`, `debug.inspect`, `rtos.status`, `rtos.snapshot`, `debug.breakpoints.list`, `variables.read`,
+  `variables.sample`, `variables.exportCsv`): if preconditions are unchanged, retry **at most once**.
+  If it fails again, stop and report the diagnostic.
+- **State-changing calls** (`config.set`, `debug.start`, `debug.control`,
+  `debug.breakpoints.update`, `peripherals.write`, `variables.write`, flash programming): a
+  transport timeout means the **result is unknown** (`details.resultUnknown` is `true`). The
+  request may have taken effect, not taken effect, or still be running. **Do not resend it
+  automatically.** Query the matching read-only method to learn the real state, report it, and
+  let the user decide. A timeout never means the request was cancelled.
+
+## Cross-skill calls
+
+- Peripheral reads/writes reuse an active sampling connection or the selected supported debug connection;
+  they never start a temporary connection. Without debugging, start sampling explicitly and wait for it to
+  connect before register access. `PERIPHERAL_SAMPLING_REQUIRED` means no usable sampling connection exists.
+  Managed single-core and sampling accesses never halt/reset/resume. Multicore/external-server access remains
+  paused-only. Bitfield writes are not atomic against firmware/hardware. A completed write with different or
+  unavailable readback does not prove that nothing was written; never automatically resend it.
+- The debug probe has a **single owner**. Do not start a second OpenOCD-backed operation
+  (flash, chip info, fault read, sampling) while another is running; `PROBE_BUSY` means wait or
+  let the user stop the current owner — the skill never implicitly pauses or preempts.
+- Route by need: configuration via `mcu-config`; STM32 `.ioc` changes and initialization generation via `mcu-cubemx`; firmware footprint via `mcu-elf-analyze`
+  (static, no hardware, but still needs the Bridge to read the selected ELF); live identity via
+  `mcu-chip-info`; crash diagnosis via `mcu-fault-analyzer`; variables via `mcu-variables`;
+  registers via `mcu-peripheral-debug`; session control and paused C/C++ object inspection via
+  `mcu-debug-control`; RTOS task metadata via `mcu-rtos`; flashing via `mcu-flash`.
+- Distinguish **no hardware dependency** from **no Bridge dependency**. Some reads need no probe
+  (ELF analysis, `peripherals.list`, `config.get`) but every skill still needs the Bridge to be
+  reachable; a Bridge failure is an extension/activation problem, not a wiring problem.
+
+## Batch and verification requests
+
+For "check everything" or multi-operation requests, first build an **operation coverage table**
+listing each intended operation and its preconditions. Mark any operation whose preconditions are
+missing as **blocked** rather than attempting it. Unless the user explicitly asked, do **not**
+download resources, generate a test SVD, change settings, or start a debug session just to make a
+check pass. Report which operations ran, which were blocked and why.
+
+## Symptom diagnosis sequence
+
+When investigating target anomalies or crashes, follow this strict symptom diagnosis order:
+
+1. **Verify build and ELF artifacts**: Confirm the selected ELF path, build timestamp, and symbol status before attempting target diagnostics.
+2. **Compare firmware**: When necessary and permitted, verify or compare target flash against the selected ELF to rule out stale or mismatched firmware.
+3. **Respect probe ownership and authorization**: Before calling `fault.read`, `variables.read`, `peripherals.read`, or debug sessions, verify probe availability and respect lock constraints (`PROBE_BUSY`).
+4. **Structure observations**: Explicitly structure findings into **Observed Fact**, **Hypothesis**, and **Next Verification Step**.
+   - No fault flags, Thread mode, or a successful compilation does **not** imply normal functionality.
+   - Do not assert a "reset loop" without concrete reset flags (e.g., RCC reset flags) or explicit core reset events.
+   - After code regeneration, always rebuild before hardware validation; rebuilding does not mean the target has been updated until programmed.
+
+## Configuration changes
+
+- Change **only the fields the user requested**. A read (`config.get`, `--get`, `--status`,
+  `--list`) must never mutate configuration, bindings, or hardware.
+- An explicit repair request may include the necessary changes, but state the evidence and the
+  expected effect before applying them.
+- For temporary changes made during a test, record the original state first, then restore and
+  verify it within the authorized scope. Never leave a probe, session, or setting in a state the
+  user did not approve.
+
+## Reporting success and scope
+
+Limit every conclusion to the operation that actually ran:
+
+- A **status query** succeeding does not prove a **debug start** works.
+- A **verify** succeeding does not prove a **program/flash** succeeded.
+- A **session-gate** failure does not prove the **register-path preflight** is broken.
+- **No fault flags** does not prove the **program is running correctly** — it only means no fault
+  is currently pending.
+
+Report the concrete evidence you observed (selected ELF and its SHA-256, resolved target/probe and
+their `sources`, the DAP state event, the readback value), not an assumed outcome. If a flash or
+verify preflight degraded, surface its `diagnostics` and the per-field `sources`
+(`explicit` / `config` / `auto` / `default` / `none`) so the user can see where each value came from.

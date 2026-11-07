@@ -1,0 +1,518 @@
+"use strict";
+const { inspectElf } = require("./elf-file");
+// Shared logic for the mcu-flash program/verify entry points: reuse of EmberProbe configuration, ELF/target/probe
+// detection and OpenOCD process calls. It uses only Node built-ins and ships with skills/_emberprobe, independent of
+// the extension; without the Bridge every detection degrades to workspace inference.
+
+const fs = require("fs");
+const { canonicalFileSync } = require("./file-identity");
+const { createLineDecoder } = require("./tool-output");
+const { detectProbe, probeFromText } = require("./probe-detection");
+const { isSafeCfgPath, resolveExecutablePath, resolveOpenOcdLaunch, normalizeTransport } = require("./openocd-launch");
+const path = require("path");
+const crypto = require("crypto");
+const { spawn } = require("child_process");
+const { call, diagnosticForError } = require("./agent-client");
+const { MIN_OPENOCD_VERSION, parseVersion: parseOpenOcdVersion, checkCompatibility } = require("./openocd-policy");
+const { normalizeProbeSerial, normalizeAdapterSpeed } = require("./probe-connection");
+const { prepareProbeConnection } = require("./probe-preflight");
+const { listProbes } = require("./probe-inventory");
+const targets = require("./target-detection");
+
+function parseArgs(argv) {
+    const out = { execute: false };
+    const valued = [
+        "--workspace",
+        "--elf",
+        "--target",
+        "--probe",
+        "--openocd",
+        "--transport",
+        "--probe-serial",
+        "--adapter-speed-khz",
+        "--confirmation-id"
+    ];
+    for (let i = 0; i < argv.length; i++) {
+        const key = argv[i];
+        if (key === "--execute") out.execute = true;
+        else if (["--remember", "--permission", "--reset-permission"].includes(key)) out[key.slice(2)] = true;
+        else if (valued.includes(key)) {
+            if (!argv[i + 1]) throw new Error(`Missing value for ${key}`);
+            out[key.slice(2)] = argv[++i];
+        } else throw new Error(`Unknown argument: ${key}`);
+    }
+    if (!out.workspace) throw new Error("Missing required argument: --workspace <path>");
+    return out;
+}
+
+// Reads the EmberProbe configuration. A failed config.get is not swallowed: it returns a structured diagnostic so the
+// preflight records why it degraded, with the original error code and details; callers can still fall back to explicit
+// arguments or detection.
+async function getEmberProbeConfig(workspace, bridgeCall = call) {
+    try {
+        return { config: await bridgeCall(workspace, "config.get", {}), diagnostic: null };
+    } catch (error) {
+        return { config: null, diagnostic: diagnosticForError(error, { operation: "config.get" }) };
+    }
+}
+
+// The Bridge resolves automatic selections against the current workspace binding.
+function probeSerialOverride(result) {
+    return ["explicit", "config"].includes(result.sources?.probeSerial) ? result.probeSerial : undefined;
+}
+
+async function authorizeFlash(result, confirmationId, operation = "flash.execute") {
+    return call(result.workspace, "flash.authorize", {
+        elf: result.elf,
+        elfSha256: result.elfSha256,
+        target: result.target,
+        probe: result.probe,
+        openocd: result.openocd,
+        transport: result.transport,
+        probeSerial: probeSerialOverride(result),
+        adapterSpeedKhz: result.adapterSpeedKhz,
+        confirmationId,
+        operation
+    });
+}
+
+// Depth-first walk of workspace files, skipping ignored and unreadable directories. Extensions are compared in lower
+// case so FIRMWARE.ELF is found on case-sensitive file systems.
+function walkFiles(root, accept, ignored = targets.ELF_IGNORED_DIRS) {
+    const files = [];
+    const visit = (dir) => {
+        let entries;
+        try {
+            entries = fs.readdirSync(dir, { withFileTypes: true });
+        } catch {
+            return;
+        }
+        for (const entry of entries) {
+            const full = path.join(dir, entry.name);
+            if (entry.isDirectory()) {
+                if (!ignored.includes(entry.name) && !entry.name.startsWith(".emberprobe-cubemx-")) visit(full);
+            } else if (entry.isFile() && accept(entry.name)) files.push(full);
+        }
+    };
+    visit(root);
+    return files;
+}
+
+function readElfHeader(file) {
+    const handle = fs.openSync(file, "r");
+    try {
+        const header = Buffer.alloc(20);
+        return header.subarray(0, fs.readSync(handle, header, 0, header.length, 0));
+    } finally {
+        fs.closeSync(handle);
+    }
+}
+
+// Uses the extension's auto-detection rules: only ELF images (including Keil .axf / IAR .out), rejecting images whose
+// architecture contradicts the target, preferring images inside the project directory, then by modification time.
+function findNewestElf(root, options = {}) {
+    const images = [];
+    for (const file of walkFiles(root, targets.isElfCandidateName)) {
+        try {
+            const stats = fs.statSync(file);
+            const info = stats.isFile() && targets.elfHeaderInfo(readElfHeader(file));
+            if (info) images.push({ file, mtimeMs: stats.mtimeMs, arch: info.arch });
+        } catch {}
+    }
+    return targets.chooseElf(images, options).elf;
+}
+
+function inferTargetDetails(root) {
+    const files = targets.orderProjectFiles(
+        walkFiles(root, (name) => targets.sourcePriority(name) >= 0, targets.PROJECT_IGNORED_DIRS)
+    );
+    const entries = [];
+    for (const file of files) {
+        try {
+            if (fs.statSync(file).size > targets.MAX_PROJECT_FILE_BYTES) continue;
+            entries.push({ file, text: fs.readFileSync(file, "utf8") });
+        } catch {}
+    }
+    return targets.resolveTarget(entries);
+}
+
+function inferTarget(root) {
+    return inferTargetDetails(root).target;
+}
+
+function sha256(file) {
+    return new Promise((resolve, reject) => {
+        const stream = fs.createReadStream(file);
+        const hash = crypto.createHash("sha256");
+        stream.on("data", (chunk) => hash.update(chunk));
+        stream.on("error", reject);
+        stream.on("end", () => resolve(hash.digest("hex")));
+    });
+}
+
+function checkOpenOcdVersion(version) {
+    const { compatible, reason, minimumVersion } = checkCompatibility(version);
+    return { compatible, reason, minimumVersion };
+}
+
+function probeOpenOcdCompatibility(executable, timeoutMs = 5000, spawnProcess = spawn) {
+    let binary;
+    try {
+        binary = resolveExecutablePath(executable);
+    } catch (error) {
+        return Promise.resolve({
+            found: false,
+            path: executable,
+            version: "",
+            compatible: false,
+            minimumVersion: MIN_OPENOCD_VERSION,
+            error: error.message,
+            code: error.code
+        });
+    }
+    return new Promise((resolve) => {
+        let child;
+        try {
+            child = spawnProcess(binary, ["--version"], { windowsHide: true, shell: false });
+        } catch (error) {
+            resolve({
+                found: false,
+                path: binary,
+                version: "",
+                compatible: false,
+                minimumVersion: MIN_OPENOCD_VERSION,
+                error: error.message
+            });
+            return;
+        }
+        let output = "";
+        let settled = false;
+        const finish = (result) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            resolve(result);
+        };
+        const timer = setTimeout(() => {
+            try {
+                child.kill();
+            } catch {
+                /* already exited */
+            }
+            finish({
+                found: false,
+                path: binary,
+                version: "",
+                compatible: false,
+                minimumVersion: MIN_OPENOCD_VERSION,
+                error: "OpenOCD version check timed out"
+            });
+        }, timeoutMs);
+        child.stdout.on("data", (chunk) => {
+            output += chunk.toString();
+        });
+        child.stderr.on("data", (chunk) => {
+            output += chunk.toString();
+        });
+        child.on("error", (error) =>
+            finish({
+                found: false,
+                path: binary,
+                version: "",
+                compatible: false,
+                minimumVersion: MIN_OPENOCD_VERSION,
+                error: error.message
+            })
+        );
+        child.on("close", () => {
+            const version = parseOpenOcdVersion(output);
+            const found = Boolean(version || /open on-chip debugger/i.test(output));
+            finish({
+                found,
+                path: binary,
+                version,
+                ...checkOpenOcdVersion(version),
+                error: found ? "" : "Executable output was not recognized as OpenOCD"
+            });
+        });
+    });
+}
+
+function tclQuote(value) {
+    const escaped = String(value)
+        .replace(/\\/g, "\\\\")
+        .replace(/"/g, '\\"')
+        .replace(/\$/g, "\\$")
+        .replace(/\[/g, "\\[")
+        .replace(/\]/g, "\\]")
+        .replace(/\r/g, "\\r")
+        .replace(/\n/g, "\\n");
+    return `"${escaped}"`;
+}
+
+// File names inside OpenOCD Tcl use forward slashes so Windows paths parse too.
+function toPosix(value) {
+    return path.sep === "/" ? value : value.split(path.sep).join("/");
+}
+
+// Runs OpenOCD and forwards stdout/stderr line by line to this process's stdout (OpenOCD diagnostics go to stderr),
+// collecting the lines for EP_VERIFY marker parsing.
+function runOpenOcd(executable, args, options = {}) {
+    return new Promise((resolve, reject) => {
+        let child;
+        try {
+            child = (options.spawnProcess || spawn)(executable, args, {
+                cwd: options.cwd,
+                windowsHide: true,
+                shell: false
+            });
+        } catch (error) {
+            reject(error);
+            return;
+        }
+        const lines = [];
+        let settled = false;
+        const timeoutMs = Number(options.timeoutMs) > 0 ? Number(options.timeoutMs) : 120000;
+        const finish = (error, result) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            if (error) reject(error);
+            else resolve(result);
+        };
+        const timer = setTimeout(() => {
+            try {
+                child.kill();
+            } catch {
+                /* process may already be exiting */
+            }
+            finish(Object.assign(new Error(`OpenOCD timed out after ${timeoutMs}ms`), { code: "OPENOCD_TIMEOUT" }));
+        }, timeoutMs);
+        let outputBytes = 0;
+        const collect = (stream) => {
+            // Whole lines, decoded from the system code page where OpenOCD quotes Windows messages.
+            const decoder = createLineDecoder((line) => {
+                lines.push(line);
+                process.stdout.write(line + "\n");
+            });
+            stream.on("data", (chunk) => {
+                if (settled) return;
+                outputBytes += chunk.length;
+                if (outputBytes > 4 * 1024 * 1024 || decoder.length + chunk.length > 65536) {
+                    child.kill("SIGKILL");
+                    finish(Object.assign(new Error("OpenOCD output limit exceeded"), { code: "OPENOCD_OUTPUT_LIMIT" }));
+                    return;
+                }
+                decoder.write(chunk);
+            });
+            stream.on("end", () => decoder.end());
+        };
+        collect(child.stdout);
+        collect(child.stderr);
+        child.on("error", (error) => {
+            finish(error);
+        });
+        child.on("close", (code) => {
+            finish(null, { code: code == null ? -1 : code, lines });
+        });
+    });
+}
+
+// Unified preflight: explicit arguments > EmberProbe configuration (Agent Bridge) > workspace/USB detection. notes
+// carry hints such as missing detection tools and are printed with the JSON. deps.call lets the MCP server call the
+// Bridge with its own channel; skill scripts use the default agent-client.
+async function preflight(options, deps = {}) {
+    const bridgeCall = deps.call || call;
+    const root = fs.realpathSync(path.resolve(options.workspace));
+    const { config, diagnostic } = await getEmberProbeConfig(root, bridgeCall);
+    // diagnostics keeps the original config.get failure (code and details) even when degrading; sources records where
+    // each field came from, so agents can tell explicit arguments, EmberProbe configuration and detection apart.
+    const diagnostics = diagnostic ? [diagnostic] : [];
+    const sources = { elf: "none", target: "none", probe: "none", openocd: "none" };
+    const notes = [];
+    let transport = normalizeTransport(options.transport ?? config?.transport ?? "auto");
+    let probeSerial = normalizeProbeSerial(options["probe-serial"] ?? config?.probeSerial ?? "");
+    const adapterSpeedKhz = normalizeAdapterSpeed(options["adapter-speed-khz"] ?? config?.adapterSpeedKhz ?? 0);
+    sources.probeSerial =
+        options["probe-serial"] !== undefined ? "explicit" : config?.probeSerial !== undefined ? "config" : "default";
+    sources.adapterSpeedKhz =
+        options["adapter-speed-khz"] !== undefined
+            ? "explicit"
+            : config?.adapterSpeedKhz !== undefined
+              ? "config"
+              : "default";
+    sources.transport =
+        options.transport !== undefined ? "explicit" : config?.transport !== undefined ? "config" : "default";
+    let candidates = [];
+    let elf = "";
+    if (options.elf) {
+        elf = String(options.elf);
+        sources.elf = "explicit";
+    } else if (config && config.elf) {
+        elf = String(config.elf);
+        sources.elf = "config";
+    }
+    let target = "";
+    if (options.target) {
+        target = String(options.target);
+        sources.target = "explicit";
+    } else if (config && config.mcu) {
+        target = String(config.mcu);
+        sources.target = "config";
+    }
+    let probe = "";
+    if (options.probe) {
+        probe = String(options.probe);
+        sources.probe = "explicit";
+    } else if (config && config.debugger) {
+        probe = String(config.debugger);
+        sources.probe = "config";
+    }
+    let openocd;
+    if (options.openocd) {
+        openocd = String(options.openocd);
+        sources.openocd = "explicit";
+    } else if (config && config.openocdPath) {
+        openocd = String(config.openocdPath);
+        sources.openocd = "config";
+    } else {
+        openocd = "openocd";
+        sources.openocd = "default";
+    }
+    // Configuration values are workspace-relative by convention; canonicalize the
+    // selected ELF before hashing/authorizing so the same bytes are flashed that the
+    // user saw in preflight, regardless of the skill process' current directory.
+    if (elf && !path.isAbsolute(elf)) elf = path.resolve(root, elf);
+    const inferred = !target || !elf ? inferTargetDetails(root) : null;
+    if (!target) {
+        target = inferred.target;
+        sources.target = target ? "auto" : "none";
+        if (!target && inferred.candidates.length > 1)
+            notes.push(`Multiple MCU targets detected (${inferred.candidates.join(", ")}); pass --target.`);
+    }
+    if (!elf) {
+        elf = findNewestElf(root, { target, projectDir: inferred.projectDir });
+        sources.elf = elf ? "auto" : "none";
+    }
+    if (!probe) {
+        const detected = await detectProbe();
+        probe = detected.probe;
+        candidates = detected.candidates;
+        sources.probe = probe ? "auto" : "none";
+        notes.push(...detected.notes);
+    }
+    const openocdCheck = await probeOpenOcdCompatibility(openocd);
+    if (!openocdCheck.compatible) {
+        const detected = openocdCheck.version ? ` ${openocdCheck.version}` : " with an unknown version";
+        const action =
+            process.platform === "win32"
+                ? "Upgrade it or use EmberProbe's bundled xPack OpenOCD."
+                : "Upgrade OpenOCD with your package manager and select the new executable.";
+        notes.push(
+            `OpenOCD${detected} is incompatible; EmberProbe requires ${MIN_OPENOCD_VERSION} or newer. ${action}`
+        );
+    }
+    let elfMtimeUtc = "";
+    let elfSha256 = "";
+    if (elf) {
+        try {
+            elf = canonicalFileSync(elf);
+            const stats = fs.statSync(elf);
+            if (!stats.isFile())
+                throw Object.assign(new Error("ELF path must be a file"), { code: "ELF_FILE_INVALID" });
+            elfMtimeUtc = stats.mtime.toISOString();
+            elfSha256 = (await inspectElf(elf)).sha256;
+        } catch (error) {
+            diagnostics.push(diagnosticForError(error, { operation: "elf.read" }));
+            notes.push(`Cannot read ELF: ${error.message}`);
+        }
+    }
+    let scriptsReady = false;
+    if (target && probe) {
+        try {
+            resolveOpenOcdLaunch(openocd, probe, target, transport);
+            const connection = await prepareProbeConnection(
+                {
+                    openocd,
+                    probe,
+                    target,
+                    transport,
+                    probeSerial,
+                    adapterSpeedKhz,
+                    // Bridge snapshots carry the v3 workspace selection; older ones only the v1/v2 record.
+                    successfulConnection: config?.selectedProbe || config?.successfulConnection
+                },
+                {
+                    listProbes: async (inventoryOptions) => {
+                        if (config) {
+                            try {
+                                return await bridgeCall(root, "probe.list", inventoryOptions);
+                            } catch {
+                                /* Use OS metadata without Bridge. */
+                            }
+                        }
+                        return listProbes(inventoryOptions);
+                    }
+                }
+            );
+            if (!probeSerial && connection.probeSerial) sources.probeSerial = "inventory";
+            probeSerial = connection.probeSerial;
+            transport = connection.transport;
+            if (connection.selection) sources.transport = connection.selection.transport;
+            notes.push(...connection.inventory.notes);
+            scriptsReady = true;
+        } catch (error) {
+            diagnostics.push(diagnosticForError(error, { operation: "openocd.launch" }));
+            notes.push(error.message);
+        }
+    }
+    return {
+        transport,
+        probeSerial,
+        adapterSpeedKhz,
+        probeCandidates: candidates,
+        workspace: root,
+        elf,
+        elfSha256,
+        elfMtimeUtc,
+        target,
+        probe,
+        openocd,
+        openocdVersion: openocdCheck.version,
+        openocdCompatible: openocdCheck.compatible,
+        minimumOpenocdVersion: MIN_OPENOCD_VERSION,
+        ready: Boolean(elfSha256 && target && probe && scriptsReady && openocdCheck.compatible),
+        notes,
+        sources,
+        diagnostics
+    };
+}
+
+function emit(value) {
+    process.stdout.write(JSON.stringify(value) + "\n");
+}
+
+module.exports = {
+    parseArgs,
+    getEmberProbeConfig,
+    probeSerialOverride,
+    authorizeFlash,
+    findNewestElf,
+    inferTarget,
+    inferTargetDetails,
+    detectProbe,
+    probeFromText,
+    sha256,
+    isSafeCfgPath,
+    resolveExecutablePath,
+    parseOpenOcdVersion,
+    checkOpenOcdVersion,
+    probeOpenOcdCompatibility,
+    resolveOpenOcdLaunch,
+    tclQuote,
+    toPosix,
+    runOpenOcd,
+    preflight,
+    emit,
+    MIN_OPENOCD_VERSION
+};

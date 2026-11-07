@@ -9,10 +9,15 @@
 #include "general_def.h"
 #include "dji_motor.h"
 #include "bmi088.h"
+#include "flysky.h"
+#include "master_link.h"
 // bsp
 #include "bsp_dwt.h"
 #include "bsp_log.h"
+#include <math.h>
 #include <string.h>
+
+_Static_assert(ARM_JOINT_NUM == MASTER_LINK_JOINT_NUM, "joint count mismatch");
 
 /* cmd应用包含的模块实例指针和交互信息存储*/
 #ifdef GIMBAL_BOARD // 对双板的兼容,条件编译
@@ -27,7 +32,12 @@ static Subscriber_t *chassis_feed_sub; // 底盘反馈信息订阅者
 static Chassis_Ctrl_Cmd_s chassis_cmd_send;      // 发送给底盘应用的信息(本项目不用, 保持全0)
 static Chassis_Upload_Data_s chassis_fetch_data; // 从底盘应用接收的反馈信息
 
+#ifdef RC_USE_DJI
 static RC_ctrl_t *rc_data;              // 遥控器数据,初始化时返回
+#endif
+#ifdef RC_USE_FLYSKY
+static FS_ctrl_t *fs_data;              // 富斯遥控器数据, [0] 是当前帧
+#endif
 static Vision_Recv_s *vision_recv_data; // 视觉接收数据指针,初始化时返回
 static Vision_Send_s vision_send_data;  // 视觉发送数据
 
@@ -47,7 +57,13 @@ BMI088Instance *bmi088_test; // 云台IMU
 BMI088_Data_t bmi088_data;
 void RobotCMDInit()
 {
+#ifdef RC_USE_DJI
     rc_data = RemoteControlInit(&huart5);   // 修改为对应串口,注意如果是自研板dbus协议串口需选用添加了反相器的那个
+#endif
+#ifdef RC_USE_FLYSKY
+    fs_data = FSControlInit(&huart5);       // 富斯接收机 SBUS, 和 DBUS 用同一个带反相器的串口
+#endif
+    MasterLinkRxInit(&MASTER_LINK_UART);    // 主臂(同构遥控器)链路
     vision_recv_data = VisionInit(&huart9); // 视觉通信串口
 
     gimbal_cmd_pub = PubRegister("gimbal_cmd", sizeof(Gimbal_Ctrl_Cmd_s));
@@ -73,7 +89,13 @@ void RobotCMDInit()
 #endif // GIMBAL_BOARD
     gimbal_cmd_send.mode = ARM_ZERO_FORCE; // 上电不出力, 遥控器给出运行模式后才出力
 
+#ifdef RC_USE_DJI
     robot_state = ROBOT_READY; // 启动时机器人进入工作模式,后续加入所有应用初始化完成之后再进入
+#endif
+#ifdef RC_USE_FLYSKY
+    // 上电锁在急停: 必须先把 switch_l1 拨到上(确认)一次才能出力, 避免上电时开关已在运行位就直接出力
+    robot_state = ROBOT_STOP;
+#endif
 }
 
 /* ------------------------------ 机械臂基础接口 ------------------------------ */
@@ -139,7 +161,8 @@ typedef struct
     float move_time;        // 走到这个点的时长, s
 } Arm_Step_s;
 
-static const Arm_Step_s arm_seq_home[] = {
+/* unused: 富斯模式下还没有触发自动流程的按键 */
+__attribute__((unused)) static const Arm_Step_s arm_seq_home[] = {
     {{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f}, 2.0f},
 };
 
@@ -148,7 +171,7 @@ static uint8_t arm_seq_len;        // 点位数
 static uint8_t arm_seq_step;       // 当前步
 static uint8_t arm_seq_step_sent;  // 当前步的目标是否已经下发
 
-static void ArmSeqStart(const Arm_Step_s *steps, uint8_t len)
+__attribute__((unused)) static void ArmSeqStart(const Arm_Step_s *steps, uint8_t len)
 {
     arm_seq = steps;
     arm_seq_len = len;
@@ -187,6 +210,7 @@ static void ArmSeqRun()
 }
 
 /* ------------------------------ 遥控器示例 ------------------------------ */
+#ifdef RC_USE_DJI
 
 // 增量式遥控: 摇杆满量程(660)对应的关节速度, rad/s; 死区防止摇杆回中不准导致漂移
 #define ARM_RC_FULL_SPEED 1.0f
@@ -294,6 +318,252 @@ static void EmergencyHandler()
     }
 }
 
+/*
+ * DJI 遥控器的每周期入口. 以后换回 DJI 遥控器时, 主臂控制按富斯版 FlySkyCmd() 的写法
+ * 加一个分支调 MasterArmControl() 即可 (开关分配到时再定).
+ */
+static void DjiCmd()
+{
+    // 根据遥控器左侧开关,确定当前使用的控制模式为遥控器调试还是键鼠
+    if (switch_is_down(rc_data[TEMP].rc.switch_left)) // 遥控器左侧开关状态为[下],遥控器控制
+        RemoteControlSet();
+    else if (switch_is_up(rc_data[TEMP].rc.switch_left)) // 遥控器左侧开关状态为[上],键盘控制
+        MouseKeySet();
+    ArmSeqRun();
+
+    EmergencyHandler(); // 处理模块离线和遥控器急停等紧急情况
+
+    last_dial = rc_data[TEMP].rc.dial;
+    last_key_g_count = rc_data[TEMP].key_count[KEY_PRESS][Key_G];
+    last_key_b_count = rc_data[TEMP].key_count[KEY_PRESS][Key_B];
+}
+#endif // RC_USE_DJI
+
+/* ------------------------------ 主臂(同构遥控器)控制 ------------------------------ */
+/*
+ * 主臂经串口(modules/master_link)发来 6 个关节角, 已经是从臂的 URDF 关节角.
+ * 接管流程: 取一次主臂角度的快照 -> ArmMoveTo 慢速对齐 -> 到位且主臂没动 -> ArmFollow 跟随.
+ * 链路不可用(掉线/心跳停/主端报告无效)时置 ROBOT_STOP 锁存, 和急停一样要人工确认才能恢复.
+ */
+#define ARM_ALIGN_SPEED 0.3f    // 对齐时按最大关节差/这个速度估时长, rad/s
+#define ARM_ALIGN_TIME_MIN 1.0f // s
+#define ARM_ALIGN_TIME_MAX 5.0f // s, 和 gimbal 侧 TIMED 时长上限一致
+#define ARM_ALIGN_TOL 0.05f     // 对齐完成时主臂离快照的最大偏差, rad; 超过就重新对齐
+
+typedef enum
+{
+    MASTER_IDLE = 0, // 下一周期取快照开始对齐
+    MASTER_ALIGN,    // 正在慢速走向快照
+    MASTER_FOLLOW,   // 跟随主臂
+} Master_Ctrl_State_e;
+
+static Master_Ctrl_State_e master_state;
+static float master_align_q[ARM_JOINT_NUM]; // 对齐目标(主臂快照, 已夹进限位)
+static float master_align_time;
+static uint8_t master_align_sent;     // 对齐目标已下发一个周期(arrived 晚一周期)
+static uint32_t master_link_lost_cnt; // 主臂控制时链路不可用导致急停的次数, 调试看
+
+static void ClampToJointLimit(float q[ARM_JOINT_NUM])
+{
+    for (uint8_t j = 0; j < ARM_JOINT_NUM; j++)
+    {
+        if (q[j] < ARM_JOINT_Q_MIN)
+            q[j] = ARM_JOINT_Q_MIN;
+        else if (q[j] > ARM_JOINT_Q_MAX)
+            q[j] = ARM_JOINT_Q_MAX;
+    }
+}
+
+static float MaxAbsDiff(const float a[ARM_JOINT_NUM], const float b[ARM_JOINT_NUM])
+{
+    float m = 0.0f;
+    for (uint8_t j = 0; j < ARM_JOINT_NUM; j++)
+        if (fabsf(a[j] - b[j]) > m)
+            m = fabsf(a[j] - b[j]);
+    return m;
+}
+
+/* 反馈的实际角. gimbal_fetch_data 是 pack(1) 的, 不能直接把成员地址当 float* 用 (文档 3.3.5) */
+static void ArmActualQ(float q[ARM_JOINT_NUM])
+{
+    memcpy(q, gimbal_fetch_data.q, sizeof(gimbal_fetch_data.q));
+}
+
+static void MasterReset()
+{
+    master_state = MASTER_IDLE;
+}
+/**
+ * @brief 主臂控制, 每周期调用. 链路不可用时置 ROBOT_STOP (调用者负责之后发零力矩)
+ */
+__attribute__((unused)) static void MasterArmControl()
+{
+    float q_m[ARM_JOINT_NUM];
+    float q_act[ARM_JOINT_NUM];
+
+    ArmSeqStop();
+    if (!MasterLinkIsValid())
+    {
+        master_link_lost_cnt++;
+        robot_state = ROBOT_STOP; // 锁存, 恢复要人工确认, 确认后重新对齐
+        MasterReset();
+        return;
+    }
+    MasterLinkGetQ(q_m);
+    ClampToJointLimit(q_m); // gimbal 也会夹; 这里先夹是为了对齐误差的比较能收敛
+    ArmRun();
+
+    // 刚切 RUN 的那一周期反馈还是 limp, 或者 gimbal 有锁存故障: 目标不会生效, 等 limp 解除再开始对齐
+    if (gimbal_fetch_data.limp)
+    {
+        MasterReset();
+        return;
+    }
+
+    switch (master_state)
+    {
+    case MASTER_IDLE:
+        memcpy(master_align_q, q_m, sizeof(master_align_q));
+        ArmActualQ(q_act);
+        master_align_time = MaxAbsDiff(master_align_q, q_act) / ARM_ALIGN_SPEED;
+        if (master_align_time < ARM_ALIGN_TIME_MIN)
+            master_align_time = ARM_ALIGN_TIME_MIN;
+        if (master_align_time > ARM_ALIGN_TIME_MAX)
+            master_align_time = ARM_ALIGN_TIME_MAX;
+        master_align_sent = 0;
+        master_state = MASTER_ALIGN;
+        /* fall through */
+    case MASTER_ALIGN:
+        ArmMoveTo(master_align_q, master_align_time); // 快照固定, gimbal 只规划一次
+        if (!master_align_sent) // 刚下发的这一周期, arrived 还是上一个目标的
+        {
+            master_align_sent = 1;
+            break;
+        }
+        if (ArmIsArrived())
+        {
+            if (MaxAbsDiff(q_m, master_align_q) < ARM_ALIGN_TOL)
+            {
+                master_state = MASTER_FOLLOW;
+                ArmFollow(q_m);
+            }
+            else
+                master_state = MASTER_IDLE; // 对齐期间主臂被动过, 下一周期重新取快照
+        }
+        break;
+    case MASTER_FOLLOW:
+        ArmFollow(q_m);
+        break;
+    }
+}
+/* ------------------------------ 富斯遥控器 (调试用) ------------------------------ */
+#ifdef RC_USE_FLYSKY
+/*
+ * 开关分配:
+ *   switch_l1 (最左拨杆)  上: 零力矩, 同时是急停/故障的确认; 中、下: 允许出力
+ *   switch_r2 (最右拨杆)  下: 主臂控制; 其他: 富斯摇杆控制关节
+ *   switch_l2 (左侧第2个) 富斯控制时选关节组: 上 -> J0~J2, 其他 -> J3~J5
+ * 摇杆只用会自动回中的三个通道 (右水平 rocker_r_ -> 组内第1个关节, 右竖直 rocker_r1 -> 第2个,
+ * 左水平 rocker_l_ -> 第3个). 左竖直 rocker_l1 一般是油门杆, 不回中, 不用来控制关节.
+ * 急停锁存 (ROBOT_STOP) 的来源: 上电、遥控器离线、主臂控制时链路不可用. 恢复: switch_l1 拨到上.
+ */
+#define FS_ROCKER_FULL 784       // SBUS 摇杆满量程
+#define FS_ROCKER_DEADBAND 30
+#define FS_ARM_FULL_SPEED 1.0f   // 满量程对应的关节速度, rad/s, 不要超过 dq_max(3)
+
+typedef enum
+{
+    CTRL_SRC_NONE = 0,
+    CTRL_SRC_FLYSKY,
+    CTRL_SRC_MASTER,
+} Ctrl_Source_e;
+
+static Ctrl_Source_e ctrl_source; // 上一周期谁在控制
+static uint32_t fs_dwt_cnt;
+
+static float FsRockerToSpeed(int16_t rocker)
+{
+    if (rocker < FS_ROCKER_DEADBAND && rocker > -FS_ROCKER_DEADBAND)
+        return 0.0f;
+    return FS_ARM_FULL_SPEED * (float)rocker / (float)FS_ROCKER_FULL;
+}
+
+/* 富斯摇杆点动关节, 写法同 DJI 版 RemoteControlSet() */
+static void FlySkyJointControl()
+{
+    float speed[ARM_JOINT_NUM] = {0};
+    float dt = DWT_GetDeltaT(&fs_dwt_cnt);
+    uint8_t base = fs_data[TEMP].switch_l2 == FS_SW_UP ? 0 : 3;
+    uint8_t moving = 0;
+
+    if (dt > 0.02f) // 刚切进来或任务被卡住过, 防止积出一大步
+        dt = 0.0f;
+    speed[base + 0] = FsRockerToSpeed(fs_data[TEMP].rocker_r_);
+    speed[base + 1] = FsRockerToSpeed(fs_data[TEMP].rocker_r1);
+    speed[base + 2] = FsRockerToSpeed(fs_data[TEMP].rocker_l_);
+    ArmRun();
+
+    for (uint8_t j = 0; j < ARM_JOINT_NUM; j++)
+        if (speed[j] != 0.0f)
+            moving = 1;
+    if (!moving)
+        return;
+    float *q = ArmTarget();
+    ArmSeqStop();
+    if (gimbal_cmd_send.move != ARM_MOVE_FOLLOW) // 之前在走定时(对齐/点位), 从实际角开始累加
+        ArmActualQ(q);
+    for (uint8_t j = 0; j < ARM_JOINT_NUM; j++)
+        q[j] += speed[j] * dt;
+    ArmFollow(q);
+}
+/* 富斯遥控器的每周期入口: 急停/确认 -> 选控制源 */
+static void FlySkyCmd()
+{
+    if (!FSControlIsOnline()) // 离线时开关值是 0, 不能当成任何位置
+        robot_state = ROBOT_STOP;
+    else if (fs_data[TEMP].switch_l1 == FS_SW_UP) // 确认位: 解除锁存, 但这一位本身就是零力矩
+    {
+        robot_state = ROBOT_READY;
+        ArmSeqStop();
+        ArmZeroForce(); // 也是 gimbal 故障锁存的确认 (至少一个周期 ZERO_FORCE)
+        MasterReset();
+        ctrl_source = CTRL_SRC_NONE;
+        return;
+    }
+
+    if (robot_state == ROBOT_READY)
+    {
+        if (fs_data[TEMP].switch_r2 == FS_SW_DOWN)
+        {
+            MasterArmControl(); // 链路不可用时会把 robot_state 置成 STOP
+            ctrl_source = CTRL_SRC_MASTER;
+        }
+        else
+        {
+            // 刚从主臂控制切过来: 原地停住, 不要接着走向主臂最后的角度(或对齐目标)
+            if (ctrl_source == CTRL_SRC_MASTER && !gimbal_fetch_data.limp)
+            {
+                float *q = ArmTarget();
+                ArmActualQ(q);
+                ArmFollow(q);
+            }
+            MasterReset();
+            FlySkyJointControl();
+            ArmSeqRun(); // 富斯模式下还没有启动流程的按键, 这里保持和 DJI 版相同的调用位置
+            ctrl_source = CTRL_SRC_FLYSKY;
+        }
+    }
+
+    if (robot_state == ROBOT_STOP) // 锁存, 直到 switch_l1 拨到上
+    {
+        ArmSeqStop();
+        ArmZeroForce(); // 机械臂失力会下落, 注意托住
+        MasterReset();
+        ctrl_source = CTRL_SRC_NONE;
+    }
+}
+#endif // RC_USE_FLYSKY
+
 /* 机器人核心控制任务,与RobotTask同频运行(必须高于视觉发送频率) */
 void RobotCMDTask()
 {
@@ -311,18 +581,12 @@ void RobotCMDTask()
     // 目标角默认保持gimbal当前生效的目标, 下面的控制逻辑在它上面修改
     ArmSyncTarget();
 
-    // 根据遥控器左侧开关,确定当前使用的控制模式为遥控器调试还是键鼠
-    if (switch_is_down(rc_data[TEMP].rc.switch_left)) // 遥控器左侧开关状态为[下],遥控器控制
-        RemoteControlSet();
-    else if (switch_is_up(rc_data[TEMP].rc.switch_left)) // 遥控器左侧开关状态为[上],键盘控制
-        MouseKeySet();
-    ArmSeqRun();
-
-    EmergencyHandler(); // 处理模块离线和遥控器急停等紧急情况
-
-    last_dial = rc_data[TEMP].rc.dial;
-    last_key_g_count = rc_data[TEMP].key_count[KEY_PRESS][Key_G];
-    last_key_b_count = rc_data[TEMP].key_count[KEY_PRESS][Key_B];
+#ifdef RC_USE_DJI
+    DjiCmd();
+#endif
+#ifdef RC_USE_FLYSKY
+    FlySkyCmd();
+#endif
 
     memcpy(gimbal_cmd_send.q_target, arm_target, sizeof(gimbal_cmd_send.q_target));
 

@@ -24,6 +24,22 @@
 //#define VISION_USE_VCP  // 使用虚拟串口发送视觉数据
 #define VISION_USE_UART // 使用串口发送视觉数据
 
+/* 遥控器类型, 只能定义一个. 两种接收机都接 UART5 (100 kbps, 偶校验, 反相)
+ * 富斯: SBUS, 调试用; 以后有 DJI 遥控器了改回 RC_USE_DJI. 开关分配见 robot_cmd.c */
+#define RC_USE_FLYSKY
+// #define RC_USE_DJI
+#if defined(RC_USE_FLYSKY) == defined(RC_USE_DJI)
+#error Define exactly one of RC_USE_FLYSKY / RC_USE_DJI
+#endif
+
+/* 主臂(同构遥控器)链路串口, 波特率 115200. 换串口改这里, 该串口要在 CubeMX 里配好 RX DMA 和中断
+ * (MC02 上满足条件的: USART1/2/3/10; UART7 没配 DMA, UART8/9 没开中断) */
+#define MASTER_LINK_UART huart10
+
+/* 关节软限位, 要和 Instance/Src/ins_arm.c 的 qmin/qmax 一致 (cmd 用它把主臂角度夹进限位后再比较对齐误差) */
+#define ARM_JOINT_Q_MIN (-3.14f)
+#define ARM_JOINT_Q_MAX (3.14f)
+
 /* 机器人重要参数定义,注意根据不同机器人进行修改,浮点数需要以.0或f结尾,无符号以u结尾 */
 // 云台参数
 #define YAW_CHASSIS_ALIGN_ECD 2711  // 云台和底盘对齐指向相同方向时的电机编码器值,若对云台有机械改动需要修改
