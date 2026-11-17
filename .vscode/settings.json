@@ -12,4 +12,5 @@
         "ozone",
         "orbit"
     ],
+    "emberprobe.sampleFrequencyHz": 200,
 }

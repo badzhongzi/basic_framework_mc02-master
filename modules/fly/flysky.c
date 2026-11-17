@@ -30,14 +30,14 @@ static USARTInstance *fs_usart_instance;
 static DaemonInstance *fs_daemon_instance;
 
 /**
- * @brief 矫正遥控器摇杆的值,超过660或者小于-660的值都认为是无效值,置0
+ * @brief 矫正遥控器摇杆的值,超过783或者小于-783的值都认为是无效值,置0
  *
  */
 static void RectifyRCjoystick()
 {
     for (uint8_t i = 0; i < 4; ++i)
     {
-        if (abs(*(&fs_ctrl[TEMP].rocker_r_ + i)) > FS_DATA_MAX)
+        if (abs(*(&fs_ctrl[TEMP].rocker_r_ + i)) > (FS_DATA_MAX - FS_DATA_MID))
             *(&fs_ctrl[TEMP].rocker_r_ + i) = 0;
     }
 
@@ -183,6 +183,16 @@ FS_ctrl_t *FSControlInit(UART_HandleTypeDef *fs_usart_handle)
         .owner_id = NULL, // 只有1个遥控器,不需要owner_id
     };
     fs_daemon_instance = DaemonRegister(&daemon_conf);
+
+    // 上电后、收到第一帧有效数据前, 给四个拨杆一个确定的默认位 UP(=1) 此默认位为遥控器警告界面要求的值
+    // 0 不是任何合法开关位置(UP=1 / MID=3 / DOWN=2), 留在 0 会让上层控制逻辑误判.
+    for (uint8_t i = 0; i < 2; ++i)
+    {
+        fs_ctrl[i].switch_l1 = FS_SW_UP;
+        fs_ctrl[i].switch_l2 = FS_SW_UP;
+        fs_ctrl[i].switch_r1 = FS_SW_UP;
+        fs_ctrl[i].switch_r2 = FS_SW_UP;
+    }
 
     fs_init_flag = 1;
     return fs_ctrl;

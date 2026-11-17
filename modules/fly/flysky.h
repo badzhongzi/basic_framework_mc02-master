@@ -44,7 +44,7 @@
 #define FS_SW_MID ((uint16_t)3)  // 开关中间时的值
 #define FS_SW_DOWN ((uint16_t)2) // 开关向下时的值
 
-
+// 死区设置
 #define fs_data_dead_limit(data, dealine)        			\
     {                                                    	\
         if((data) > (dealine) || (data) < -(dealine)) 		\
@@ -75,15 +75,15 @@
 /* ----------------------- Data Struct ------------------------------------- */
 typedef struct
 {
-    int16_t rocker_r_;      // 左水平，SBUS[-784~783],iBUS[-500~500]
-    int16_t rocker_r1;      // 左竖直，SBUS[-784~783],iBUS[-500~500]
-    int16_t rocker_l1;      // 右水平，SBUS[-784~783],iBUS[-500~500]
-    int16_t rocker_l_;      // 右竖直，SBUS[-784~783],iBUS[-500~500]
+    int16_t rocker_r_;      // 右水平，SBUS[-784~783],iBUS[-500~500]
+    int16_t rocker_r1;      // 右竖直，SBUS[-784~783],iBUS[-500~500]
+    int16_t rocker_l1;      // 左竖直，SBUS[-784~783],iBUS[-500~500]
+    int16_t rocker_l_;      // 左水平，SBUS[-784~783],iBUS[-500~500]
 
-    uint16_t switch_l1;  // 最左侧拨杆
-    uint16_t switch_l2;  // 左侧第2个拨杆
-    uint16_t switch_r1;  // 右侧第1个拨杆
-    uint16_t switch_r2;  // 最右侧拨杆
+    uint16_t switch_l1;  // 最左侧拨杆(1 2)
+    uint16_t switch_l2;  // 左侧第2个拨杆(1 2)
+    uint16_t switch_r1;  // 右侧第1个拨杆(1 3 2)
+    uint16_t switch_r2;  // 最右侧拨杆(1 2)
 
     int16_t knob_l;         // 左边旋钮，SBUS[0~1567],iBUS[0~1000]
     int16_t knob_r;         // 右边旋钮，SBUS[0~1567],iBUS[0~1000]
