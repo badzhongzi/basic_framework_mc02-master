@@ -12,6 +12,133 @@ function descriptor(workspace) {
 }
 
 const DIAGNOSTICS = {
+    RTT_NOT_RUNNING: [
+        "rtt_state",
+        "RTT 尚未运行或正在等待主机会话。",
+        ["先用 {{method:rtt.status}} 查询状态；按用户要求启动后等待 running 再读取。"],
+        false
+    ],
+    RTT_UNKNOWN_CHANNEL: [
+        "rtt_channel",
+        "所选 RTT 上行通道不可用。",
+        ["用 {{method:rtt.status}} 查看 channels、missingChannels 和 buffers，选择可用通道。"],
+        false
+    ],
+    RTT_MULTICORE_UNSUPPORTED: [
+        "rtt_support",
+        "RTT 不支持多核调试会话。",
+        ["使用单核会话；不要为读取日志自动更改调试配置。"],
+        false
+    ],
+    RTT_CONTROL_BLOCK_UNKNOWN: [
+        "rtt_firmware",
+        "无法定位 RTT 控制块。",
+        ["确认固件集成并初始化 SEGGER RTT，且 ELF 与固件一致。仅按用户要求通过 {{config}} 设置 RTT 地址或搜索范围。"],
+        false
+    ],
+    RTT_CONTROL_BLOCK_AMBIGUOUS: [
+        "rtt_configuration",
+        "找到多个可能的 RTT 控制块。",
+        ["核对 ELF 与固件，仅按用户要求通过 {{config}} 指定控制块地址；不要猜选地址。"],
+        false
+    ],
+    RTT_SCAN_RANGE_TOO_LARGE: [
+        "rtt_configuration",
+        "RTT 搜索范围超出扫描预算。",
+        ["核对 ELF 中的控制块符号，仅按用户要求通过 {{config}} 缩小 RTT 搜索范围或指定地址。"],
+        false
+    ],
+    RTT_SCAN_TIMEOUT: [
+        "rtt_connection",
+        "RTT 控制块搜索时探针无响应，会话已重置。",
+        ["不要自动重复启动；让用户指定控制块地址，或调整 emberprobe.samplingAdapterSpeedKhz。"],
+        false
+    ],
+    RTT_START_TIMEOUT: [
+        "rtt_start",
+        "RTT 启动重试已耗尽，固件可能尚未初始化控制块或通道。",
+        ["先用 {{method:rtt.status}} 核对状态与错误，再检查固件初始化和 ELF；不要自动重复启动。"],
+        false
+    ],
+    RTT_PORT_UNAVAILABLE: [
+        "rtt_connection",
+        "RTT 数据连接无法建立。",
+        ["用 {{method:rtt.status}} 核对状态，检查扩展的连接诊断后再决定是否重试。"],
+        false
+    ],
+    RTT_CHANNEL_DISCONNECTED: [
+        "rtt_connection",
+        "RTT 通道连接已断开。",
+        ["用 {{method:rtt.status}} 核对连接与会话状态。"],
+        false
+    ],
+    RTT_CANCELLED: [
+        "rtt_state",
+        "RTT 操作因停止或会话变化而取消。",
+        ["用 {{method:rtt.status}} 核对当前状态，不要自动重新启动。"],
+        false
+    ],
+    RTT_PARSE_ERROR: [
+        "rtt_firmware",
+        "RTT 控制块或通道信息无法解析。",
+        ["核对固件的 SEGGER RTT 集成、ELF 和扩展的诊断信息。"],
+        false
+    ],
+    RTT_INVALID_ADDRESS: [
+        "rtt_configuration",
+        "RTT 控制块地址无效。",
+        ["仅按用户要求通过 {{config}} 修正 RTT 地址。"],
+        false
+    ],
+    RTT_INPUT_UNAVAILABLE: [
+        "rtt_firmware",
+        "该 RTT 通道没有 down 缓冲，输入无法送达固件。",
+        ["用 {{method:rtt.status}} 查看 channels.down，改用固件配置了 down 缓冲的通道；不要为发送输入修改固件或配置。"],
+        false
+    ],
+    RTT_WRITE_TOO_LARGE: [
+        "rtt_input",
+        "输入超过 down 缓冲或单次 1024 字节的上限，未发送。",
+        ["按 details.maxBytes 缩短输入；不要自行拆分用户的命令，除非用户同意。"],
+        false
+    ],
+    RTT_INPUT_BUSY: [
+        "rtt_input",
+        "上一次 RTT 输入仍在发送。",
+        ["先用 {{method:rtt.read}} 读取固件回复，稍后再发送；不要自动重发。"],
+        true
+    ],
+    RTT_INPUT_CONFIRMATION_INVALID: [
+        "user_decision",
+        "RTT 输入确认已过期、已使用，或输入、通道、RTT 连接发生变化。",
+        ["重新请求发送计划，并在聊天中获得用户明确授权后使用新的 confirmationId。"],
+        false
+    ],
+    RTT_INVALID_RANGE: [
+        "rtt_configuration",
+        "RTT 搜索范围无效。",
+        ["仅按用户要求通过 {{config}} 修正 RTT 搜索范围。"],
+        false
+    ],
+    RTT_INVALID_INTERVAL: [
+        "rtt_configuration",
+        "RTT 轮询间隔无效。",
+        ["仅按用户要求通过 {{config}} 修正 RTT 轮询间隔。"],
+        false
+    ],
+    RTT_INVALID_CHANNELS: [
+        "rtt_configuration",
+        "RTT 通道选择无效。",
+        ["仅按用户要求通过 {{config}} 修正 RTT 通道选择。"],
+        false
+    ],
+    RTT_MODE_REQUIRES_UI_START: [
+        "rtt_configuration",
+        "RTT 配置了通道模式覆盖，只能由用户在 VS Code 中启动。",
+        ["请用户从 EmberProbe 侧栏或命令面板启动 RTT，之后可以继续读取。"],
+        false
+    ],
+    RTT_INVALID_CONTROL_BLOCK: ["rtt_firmware", "RTT 控制块无效。", ["检查固件初始化和控制块地址是否匹配。"], false],
     BRIDGE_UNAVAILABLE: [
         "extension",
         "EmberProbe 扩展未激活、当前工作区未启用 Agent 访问，或找不到包含当前目录的 Agent Bridge。",
@@ -410,6 +537,30 @@ const DIAGNOSTICS = {
         ["读取当前状态，并在暂停后重新列出线程、调用栈和作用域。"],
         false
     ],
+    DEBUG_EXPRESSION_REJECTED: [
+        "debug_configuration",
+        "表达式不是无副作用的变量路径：含赋值、自增/自减或函数调用。",
+        ["改用变量或成员路径，如 sensor.pos.y、buf[3]、*ptr；修改变量请走写入确认流程。"],
+        false
+    ],
+    MEMORY_REGION_NOT_ALLOWED: [
+        "peripheral_safety",
+        "原始内存读取只允许 Code 与 SRAM 区（0x00000000–0x3FFFFFFF）；外设、外部设备与系统区的读取可能有副作用。",
+        ["读取外设寄存器使用 {{peripheralRead}}，它按 SVD 拒绝读有副作用的寄存器。"],
+        false
+    ],
+    CHIP_NOT_READ: [
+        "target_connection",
+        "目标控制需要先读取一次芯片信息，以确定探针与目标连接。",
+        ["先使用 {{chipRead}} 读取芯片信息，再重试。"],
+        true
+    ],
+    CHIP_INFO_STALE: [
+        "target_connection",
+        "上次读取芯片信息后，探针或目标配置已变化。",
+        ["重新使用 {{chipRead}} 读取芯片信息，确认目标后再重试。"],
+        true
+    ],
     DEBUG_INSPECTION_INVALID: [
         "debug_configuration",
         "检查动作或分页参数无效。",
@@ -452,6 +603,30 @@ const DIAGNOSTICS = {
         ["检查 {{source}} 路径与工作区。"],
         false
     ],
+    DATA_BREAKPOINT_SESSION_UNSUPPORTED: [
+        "debug_configuration",
+        "数据断点只能用于 EmberProbe 内置调试器会话。",
+        ["使用 {{debugStart}} 启动内置调试器；不要改用外部 GDB 服务器。"],
+        false
+    ],
+    DATA_BREAKPOINT_UNSUPPORTED: [
+        "debug_value",
+        "该变量不能设置数据断点：只支持 ELF 中的全局标量或叶子路径。",
+        ["用 {{list}} 选择 1、2 或 4 字节的标量成员；结构体、位域和运行时显示路径不受支持。"],
+        false
+    ],
+    DATA_BREAKPOINT_UNAVAILABLE: [
+        "debug_value",
+        "无法解析该变量的固定存储地址，或其宽度/对齐不适合硬件观察点。",
+        ["根据 message 选择 1、2 或 4 字节且地址对齐的变量。"],
+        false
+    ],
+    DATA_BREAKPOINT_FAILED: [
+        "debug_resources",
+        "调试器未能设置或更新数据断点，常见原因是硬件观察点比较器已用完。",
+        ["先用 {{breakpoints}} 查看现有数据断点，按用户意见移除不需要的后再试。"],
+        false
+    ],
     BREAKPOINT_NOT_FOUND: [
         "debug_configuration",
         "没有找到要删除或切换的断点。",
@@ -474,7 +649,11 @@ const READ_ONLY_METHODS = new Set([
     "rtos.status",
     "rtos.snapshot",
     "debug.breakpoints.list",
-    "peripherals.list"
+    "peripherals.list",
+    "debug.evaluate",
+    "memory.read",
+    "variables.list",
+    "watch.list"
 ]);
 
 // Observation methods do not change the target, workspace or extension state, but may touch hardware or install a USB
@@ -490,6 +669,9 @@ const OBSERVATION_METHODS = new Set([
     "variables.sample",
     "peripherals.read",
     "sampling.status",
+    "rtt.status",
+    "rtt.read",
+    "rtt.input.permission",
     "flash.permission",
     "variables.write.permission",
     "cubemx.permission"
@@ -498,6 +680,7 @@ const OBSERVATION_METHODS = new Set([
 // These calls may perform a one-time USB driver installation before reading hardware.
 const DRIVER_SETUP_METHODS = new Set([
     "chip.read",
+    "target.control",
     "fault.read",
     "peripherals.read",
     "variables.read",
@@ -505,6 +688,7 @@ const DRIVER_SETUP_METHODS = new Set([
     "variables.write",
     "variables.exportCsv",
     "sampling.start",
+    "rtt.start",
     "debug.start",
     "flash.execute",
     "flash.program",
@@ -513,6 +697,9 @@ const DRIVER_SETUP_METHODS = new Set([
 
 // Queries that confirm the real outcome after a state-changing call times out; unlisted methods get a generic hint.
 const STATUS_QUERY_FOR = {
+    "rtt.start": "rtt.status",
+    "rtt.stop": "rtt.status",
+    "rtt.write": "rtt.read",
     "chip.read": "probe.list",
     "fault.read": "probe.list",
     "peripherals.read": "probe.list",
@@ -523,6 +710,9 @@ const STATUS_QUERY_FOR = {
     "config.set": "config.get",
     "debug.start": "debug.status",
     "debug.control": "debug.status",
+    "target.control": "chip.read",
+    "watch.add": "watch.list",
+    "watch.remove": "watch.list",
     "debug.breakpoints.update": "debug.breakpoints.list",
     "peripherals.write": "peripherals.read",
     "variables.write": "variables.read"
@@ -543,7 +733,9 @@ function requiresNativeSession(operation) {
 const RENDERINGS = {
     config: { skill: "mcu-config Skill", mcp: "config_get 与 config_set 工具", methods: ["config.get", "config.set"] },
     configSvd: { skill: "mcu-config", mcp: "config_set（values.svd）", methods: ["config.set"] },
-    list: { skill: "--list", mcp: "mcu-variables 的 --list（MCP 暂无等价工具）", methods: [] },
+    list: { skill: "--list", mcp: "variables_list（query）", methods: ["variables.list"] },
+    chipRead: { skill: "mcu-chip-info", mcp: "chip_read", methods: ["chip.read"] },
+    peripheralRead: { skill: "mcu-peripheral-debug --read", mcp: "peripherals_read", methods: ["peripherals.read"] },
     peripheralList: { skill: "--list 或 --query", mcp: "peripherals_list（query）", methods: ["peripherals.list"] },
     debugStart: { skill: "mcu-debug-control --start", mcp: "debug_start", methods: ["debug.start"] },
     debugPause: {

@@ -9,10 +9,21 @@ All EmberProbe skill scripts talk to the extension through a local Agent Bridge 
 failures as a single JSON `diagnostic` on stderr:
 
 ```json
-{ "ok": false, "type": "diagnostic", "operation": "config.get",
-  "error": { "code": "BRIDGE_TIMEOUT", "category": "extension", "stage": "request",
-    "message": "...", "likelyCause": "...", "retryable": false,
-    "suggestedActions": ["..."], "details": { "method": "config.get", "timeoutMs": 20000, "elapsedMs": 20001, "resultUnknown": true } } }
+{
+    "ok": false,
+    "type": "diagnostic",
+    "operation": "config.get",
+    "error": {
+        "code": "BRIDGE_TIMEOUT",
+        "category": "extension",
+        "stage": "request",
+        "message": "...",
+        "likelyCause": "...",
+        "retryable": false,
+        "suggestedActions": ["..."],
+        "details": { "method": "config.get", "timeoutMs": 20000, "elapsedMs": 20001, "resultUnknown": true }
+    }
+}
 ```
 
 Always read `error.code`, `retryable`, and `details` before deciding what to do next. The
@@ -30,11 +41,10 @@ Never enable this setting yourself, infer it from the task, or bypass a returned
 Probe ownership, target identity, firmware consistency and input checks still apply. Anonymous probes
 retain one-time-only Flash/variable-write permission, and a mismatched ELF still requires write confirmation.
 
-
 When `confirmationRequired` is true, confirm sensitive Bridge operations in the Agent conversation. Show the returned concrete
 plan and wait for the human's answer before submitting its confirmation ID. Flash programming,
-variable/peripheral writes, CubeMX generation, and Flash verification that temporarily halts
-the target use plan-bound IDs; EmberProbe does not show a second operation approval dialog.
+variable/peripheral writes, RTT input to the firmware, CubeMX generation, and Flash verification
+that temporarily halts the target use plan-bound IDs; EmberProbe does not show a second operation approval dialog.
 Pass `remember` only when the human explicitly chooses the documented 24-hour permission.
 Honor the returned `choices`: a probe without a reliable USB serial permits `once` only,
 even when the user previously granted workspace write trust. Its confirmation binds the
@@ -88,11 +98,12 @@ evidence that hardware is disconnected.
 ## Retry policy
 
 - **Read-only calls** (`config.get`, `chip.read`, `fault.read`, `elf.analyze`, `peripherals.list`,
-  `peripherals.read`, `debug.status`, `debug.inspect`, `rtos.status`, `rtos.snapshot`, `debug.breakpoints.list`, `variables.read`,
+  `peripherals.read`, `debug.status`, `debug.inspect`, `debug.evaluate`, `memory.read`, `rtos.status`, `rtos.snapshot`,
+  `debug.breakpoints.list`, `variables.read`, `variables.list`, `watch.list`,
   `variables.sample`, `variables.exportCsv`): if preconditions are unchanged, retry **at most once**.
   If it fails again, stop and report the diagnostic.
-- **State-changing calls** (`config.set`, `debug.start`, `debug.control`,
-  `debug.breakpoints.update`, `peripherals.write`, `variables.write`, flash programming): a
+- **State-changing calls** (`config.set`, `debug.start`, `debug.control`, `target.control`, `watch.add`, `watch.remove`,
+  `debug.breakpoints.update`, `peripherals.write`, `variables.write`, `rtt.write`, flash programming): a
   transport timeout means the **result is unknown** (`details.resultUnknown` is `true`). The
   request may have taken effect, not taken effect, or still be running. **Do not resend it
   automatically.** Query the matching read-only method to learn the real state, report it, and
@@ -114,6 +125,9 @@ evidence that hardware is disconnected.
   `mcu-chip-info`; crash diagnosis via `mcu-fault-analyzer`; variables via `mcu-variables`;
   registers via `mcu-peripheral-debug`; session control and paused C/C++ object inspection via
   `mcu-debug-control`; RTOS task metadata via `mcu-rtos`; flashing via `mcu-flash`.
+- Read firmware RTT output, control its attachment and send user-approved input via `mcu-rtt`.
+- Hardware data breakpoints (stop when a variable is written or read) via `mcu-debug-control`; they need a paused
+  built-in EmberProbe debug session and are shared with the sidebar.
 - Distinguish **no hardware dependency** from **no Bridge dependency**. Some reads need no probe
   (ELF analysis, `peripherals.list`, `config.get`) but every skill still needs the Bridge to be
   reachable; a Bridge failure is an extension/activation problem, not a wiring problem.
@@ -134,9 +148,9 @@ When investigating target anomalies or crashes, follow this strict symptom diagn
 2. **Compare firmware**: When necessary and permitted, verify or compare target flash against the selected ELF to rule out stale or mismatched firmware.
 3. **Respect probe ownership and authorization**: Before calling `fault.read`, `variables.read`, `peripherals.read`, or debug sessions, verify probe availability and respect lock constraints (`PROBE_BUSY`).
 4. **Structure observations**: Explicitly structure findings into **Observed Fact**, **Hypothesis**, and **Next Verification Step**.
-   - No fault flags, Thread mode, or a successful compilation does **not** imply normal functionality.
-   - Do not assert a "reset loop" without concrete reset flags (e.g., RCC reset flags) or explicit core reset events.
-   - After code regeneration, always rebuild before hardware validation; rebuilding does not mean the target has been updated until programmed.
+    - No fault flags, Thread mode, or a successful compilation does **not** imply normal functionality.
+    - Do not assert a "reset loop" without concrete reset flags (e.g., RCC reset flags) or explicit core reset events.
+    - After code regeneration, always rebuild before hardware validation; rebuilding does not mean the target has been updated until programmed.
 
 ## Configuration changes
 
