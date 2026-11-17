@@ -44,12 +44,12 @@ typedef struct
 } Arm_Joint_Motor_Config_s;
 
 static const Arm_Joint_Motor_Config_s joint_motor_config[ARM_JOINT_NUM] = {
-    {&hcan1, ARM_JOINT_ID_PLACEHOLDER, ARM_JOINT_ID_PLACEHOLDER, DM4340P}, // J0
-    {&hcan1, ARM_JOINT_ID_PLACEHOLDER, ARM_JOINT_ID_PLACEHOLDER, DM6248P}, // J1
-    {&hcan1, ARM_JOINT_ID_PLACEHOLDER, ARM_JOINT_ID_PLACEHOLDER, DM6248P}, // J2
-    {&hcan2, ARM_JOINT_ID_PLACEHOLDER, ARM_JOINT_ID_PLACEHOLDER, DM4310P}, // J3
-    {&hcan2, ARM_JOINT_ID_PLACEHOLDER, ARM_JOINT_ID_PLACEHOLDER, DM4340P}, // J4
-    {&hcan2, ARM_JOINT_ID_PLACEHOLDER, ARM_JOINT_ID_PLACEHOLDER, DM4310},  // J5
+    {&hcan1, 0x01, 0x11, DM4340P}, // J0
+    {&hcan1, 0x02, 0x12, DM6248P}, // J1
+    {&hcan1, 0x03, 0x13, DM6248P}, // J2
+    {&hcan1, 0x04, 0x14, DM4310P}, // J3
+    {&hcan1, 0x05, 0x15, DM4340P}, // J4
+    {&hcan1, 0x06, 0x16, DM4310},  // J5
 };
 
 /*
