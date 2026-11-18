@@ -35,9 +35,12 @@ void StartUITASK(void const *argument);
  */
 void OSTaskInit()
 {
-    osThreadDef(instask, StartINSTASK, osPriorityAboveNormal, 0, 1024);
-    insTaskHandle = osThreadCreate(osThread(instask), NULL); // 由于是阻塞读取传感器,为姿态解算设置较高优先级,确保以1khz的频率执行
-    // // 后续修改为读取传感器数据准备好的中断处理,
+    // 【已禁用 INS 任务】INS_Init() 里 BMI088Init 是死等循环(无超时/无 osDelay),
+    // 以 AboveNormal 优先级会阻塞所有 Normal 任务(含 DM 电机任务), 导致电机上电后
+    // 要等 BMI088 初始化成功(数秒)才发使能帧、才变绿. 本项目不用 IMU, 直接不创建该任务.
+    // VisionSend 已由 robot_cmd.c 的 RobotCMDTask 调用, 不会因此丢失.
+    // osThreadDef(instask, StartINSTASK, osPriorityAboveNormal, 0, 1024);
+    // insTaskHandle = osThreadCreate(osThread(instask), NULL);
 
     osThreadDef(motortask, StartMOTORTASK, osPriorityNormal, 0, 256);
     motorTaskHandle = osThreadCreate(osThread(motortask), NULL);
