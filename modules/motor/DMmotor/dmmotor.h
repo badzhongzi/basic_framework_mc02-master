@@ -38,8 +38,8 @@
 #define DM_T_MIN  (-18.0f)
 #define DM_T_MAX   18.0f
 
-// 模式指令(使能/清错)的最小发送间隔,单位为电机任务周期(2ms),即100ms一次
-#define DM_MODE_CMD_INTERVAL 50
+// 模式指令(使能/清错)的最小发送间隔,单位为电机任务周期(2ms),即20ms一次
+#define DM_MODE_CMD_INTERVAL 10
 
 /* 反馈帧D[0]高4位的电机状态 */
 typedef enum
