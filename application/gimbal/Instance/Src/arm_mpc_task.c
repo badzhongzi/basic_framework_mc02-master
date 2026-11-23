@@ -223,6 +223,10 @@ static void reference_torque(const EC_JointStateReference *r,
  */
 _Static_assert(MPC_NJ == ARM_MPC_JOINT_COUNT, "MPC joint count mismatch");
 
+/* 分段耗时诊断(CPU 周期, 480 cycles = 1 us):
+ * [0]=轨迹求值x13, [1]=RNEAx3+摩擦, [2]=CRBA+观测器update, [3]=6轴ADMM求解+饱和 */
+static uint32_t mpc_prof[4];
+
 static bool mpc_solve_all(ArmMpcTask *self, const EC_TrajPlan *plan) {
   const uint32_t step = ARM_MPC_TICKS_PER_STEP;
   const uint32_t t_meas = self->tick - (uint32_t)MPC_EST_FB * step;
@@ -233,8 +237,10 @@ static bool mpc_solve_all(ArmMpcTask *self, const EC_TrajPlan *plan) {
   float dtau[ARM_MPC_JOINT_COUNT], tau_cmd[ARM_MPC_JOINT_COUNT];
   float qr_e[MPC_CS_NB][ARM_MPC_JOINT_COUNT];
   float dqr_e[MPC_CS_NB][ARM_MPC_JOINT_COUNT];
+  uint32_t c0, c1, c2, c3, c4;
   uint8_t i, j;
 
+  c0 = DWT->CYCCNT;
   if (!ec_traj_eval_tick(plan, t_meas, &r_meas) ||
       !ec_traj_eval_tick(plan, t_apply, &r_apply) ||
       !ec_traj_eval_tick(plan, t_apply + (uint32_t)MPC_CS_NS * step, &r_end)) {
@@ -251,6 +257,7 @@ static bool mpc_solve_all(ArmMpcTask *self, const EC_TrajPlan *plan) {
     }
   }
 
+  c1 = DWT->CYCCNT;
   /* 1-2. 前馈和时域末尾的前馈预测 */
   compute_feedforward(self, r_apply.q_ddot);
   reference_torque(&r_apply, tref0);
@@ -259,6 +266,7 @@ static bool mpc_solve_all(ArmMpcTask *self, const EC_TrajPlan *plan) {
     tau_ff_end[j] = self->tau_ff[j] + (tref1[j] - tref0[j]);
   }
 
+  c2 = DWT->CYCCNT;
   /* 4. 惯量比; 观测器在测量时刻更新 */
   mpc_inertia_ratio(self->q_actual, self->rho);
   for (j = 0; j < ARM_MPC_JOINT_COUNT; ++j) {
@@ -270,6 +278,7 @@ static bool mpc_solve_all(ArmMpcTask *self, const EC_TrajPlan *plan) {
     }
   }
 
+  c3 = DWT->CYCCNT;
   /* 5. 每个关节: 前推锚点 + 求解 */
   for (j = 0; j < ARM_MPC_JOINT_COUNT; ++j) {
     float anchor[2];
@@ -295,6 +304,11 @@ static bool mpc_solve_all(ArmMpcTask *self, const EC_TrajPlan *plan) {
   for (j = 0; j < ARM_MPC_JOINT_COUNT; ++j) {
     self->mpc_dtau[j] = tau_cmd[j] - self->tau_ff[j];
   }
+  c4 = DWT->CYCCNT;
+  mpc_prof[0] = c1 - c0;
+  mpc_prof[1] = c2 - c1;
+  mpc_prof[2] = c3 - c2;
+  mpc_prof[3] = c4 - c3;
   return true;
 }
 

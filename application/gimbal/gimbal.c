@@ -70,7 +70,7 @@ static const ArmMpcJointConfig joint_cfg[ARM_JOINT_NUM] = {
 };
 
 static DMMotorInstance *joint_motor[ARM_JOINT_NUM]; // 关节电机, 未注册的为NULL
-static ArmMpcTask arm_mpc;                          // 机械臂控制实例
+__attribute__((section(".dtcm"))) static ArmMpcTask arm_mpc; // 机械臂控制实例(仅CPU访问, 放DTCM零等待)
 
 static Publisher_t *gimbal_pub;                   // 机械臂状态发布者(反馈给cmd)
 static Subscriber_t *gimbal_sub;                  // cmd控制消息订阅者
