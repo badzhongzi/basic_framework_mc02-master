@@ -21,7 +21,7 @@ import math
 import random
 import re
 
-URDF = sys.argv[1] if len(sys.argv) > 1 else "D:/rm/urdf_urdf/urdf.urdf"
+URDF = sys.argv[1] if len(sys.argv) > 1 else "D:/rm/merged_urdf/merged.urdf"
 INS_ARM_C = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..",
                          "application", "gimbal", "Instance", "Src", "ins_arm.c")
 
