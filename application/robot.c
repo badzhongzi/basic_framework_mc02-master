@@ -1,3 +1,4 @@
+#include "main.h"
 #include "bsp_init.h"
 #include "robot.h"
 #include "robot_def.h"
@@ -24,7 +25,11 @@ void RobotInit()
     // 请不要在初始化过程中使用中断和延时函数！
     // 若必须,则只允许使用DWT_Delay()
     __disable_irq();
-    
+
+    // 开启 Cortex-M7 指令缓存(I-Cache), 避免 FLASH 取指等待拖慢 MPC/RNEA 求解;
+    // 不开 D-Cache, 因此不影响任何 DMA 缓冲区一致性.
+    SCB_EnableICache();
+
     BSPInit();
 
 #if defined(ONE_BOARD) || defined(GIMBAL_BOARD)

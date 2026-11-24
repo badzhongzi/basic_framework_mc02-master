@@ -33,6 +33,12 @@ void StartUITASK(void const *argument);
  * @brief 初始化机器人任务,所有持续运行的任务都在这里初始化
  *
  */
+// robottask 栈(4 KB)与 TCB 放入 480 MHz 零等待 DTCMRAM:
+// 未开 D-Cache 时, mpc_cs_solve / rnea / crba 的局部数组全在任务栈上,
+// 放 AXI SRAM 会导致单拍耗时 3.7 ms 超出 2 ms 预算. robottask 不把栈变量传给 DMA, 安全.
+__attribute__((section(".dtcm"), aligned(8))) static uint32_t robot_task_stack[1024];
+__attribute__((section(".dtcm"))) static osStaticThreadDef_t robot_task_tcb;
+
 void OSTaskInit()
 {
     // 【已禁用 INS 任务】INS_Init() 里 BMI088Init 是死等循环(无超时/无 osDelay),
@@ -48,7 +54,8 @@ void OSTaskInit()
     osThreadDef(daemontask, StartDAEMONTASK, osPriorityNormal, 0, 128);
     daemonTaskHandle = osThreadCreate(osThread(daemontask), NULL);
 
-    osThreadDef(robottask, StartROBOTTASK, osPriorityNormal, 0, 1024);
+    osThreadStaticDef(robottask, StartROBOTTASK, osPriorityNormal, 0, 1024,
+                      robot_task_stack, &robot_task_tcb);
     robotTaskHandle = osThreadCreate(osThread(robottask), NULL);
 
     osThreadDef(uitask, StartUITASK, osPriorityNormal, 0, 512);

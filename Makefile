@@ -330,7 +330,13 @@ vpath %.s $(sort $(dir $(ASM_SOURCES)))
 OBJECTS += $(addprefix $(BUILD_DIR)/,$(notdir $(ASMM_SOURCES:.S=.o)))
 vpath %.S $(sort $(dir $(ASMM_SOURCES)))
 
-$(BUILD_DIR)/%.o: %.c Makefile | $(BUILD_DIR) 
+# 控制链路计算热点单独提优 (其余文件保持 -Og 方便调试; 不开 -ffast-math 以保留 isfinite 检查)
+# rnea/crba 的 casadi_real 为 float, 用 sinf/cosf 替代 double sin/cos 避免每拍 40 次双精度三角函数
+$(BUILD_DIR)/mpc_6axis.o: OPT = -O3
+$(BUILD_DIR)/rnea_6axis.o $(BUILD_DIR)/crba_6axis.o: OPT = -O3 -include casadi_float_trig.h
+$(BUILD_DIR)/arm_mpc_task.o $(BUILD_DIR)/ec_traj.o: OPT = -O2
+
+$(BUILD_DIR)/%.o: %.c Makefile | $(BUILD_DIR)
 	$(CC) -c $(CFLAGS) -Wa,-a,-ad,-alms=$(BUILD_DIR)/$(notdir $(<:.c=.lst)) $< -o $@
 
 $(BUILD_DIR)/%.o: %.s Makefile | $(BUILD_DIR)

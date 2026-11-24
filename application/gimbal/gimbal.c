@@ -53,26 +53,24 @@ static const Arm_Joint_Motor_Config_s joint_motor_config[ARM_JOINT_NUM] = {
 };
 
 /*
- * 关节换算参数, 上板前逐项标定:
- *   direction  电机正方向与MDH关节正方向相同为1, 相反为-1 (还没标定, 全是1)
- *   q_offset   电机零位(达妙上位机设置的零点)对应的MDH关节角, rad (负责人给定的值, 上板后核对)
+ * 关节换算参数, 已于 2026-11-22 通过 urdf_can_damiao (merged.urdf) 标定:
+ *   direction  电机正方向与MDH关节正方向相同为1, 相反为-1 (仅 J0 反向)
+ *   q_offset   电机零位(达妙上位机设置的零点)对应的MDH关节角, rad (已按 q=0 姿态设零, 全 0)
  *   tau_max    关节总力矩上限, N·m. 取电机能出的最大力矩 = 上位机 TMAX = URDF effort,
  *              和生成代码里求解器的总力矩约束 MPC_EFFORT_MAX 一致.
- *              注意: direction 还没标定, 方向配反时跟踪保护要 200 ms 才动作,
- *              这段时间电机可能顶在这个值上, 第一次上电要有人看护.
  *              超过电机MIT映射范围T_MAX的部分会在初始化时被截掉
  */
 static const ArmMpcJointConfig joint_cfg[ARM_JOINT_NUM] = {
-    {.direction = 1.0f, .q_offset = -3.14f, .tau_max = 28.0f}, // J0 DM4340P
-    {.direction = 1.0f, .q_offset = 1.57f,  .tau_max = 48.0f}, // J1 DM6248P
-    {.direction = 1.0f, .q_offset = -3.08f, .tau_max = 48.0f}, // J2 DM6248P
-    {.direction = 1.0f, .q_offset = -1.57f, .tau_max = 12.5f}, // J3 DM4310P
-    {.direction = 1.0f, .q_offset = 0.0f,   .tau_max = 28.0f}, // J4 DM4340P
-    {.direction = 1.0f, .q_offset = 0.0f,   .tau_max = 12.5f}, // J5 DM4310
+    {.direction = -1.0f, .q_offset =  0.00000f, .tau_max = 28.0f}, // J0 DM4340P
+    {.direction =  1.0f, .q_offset =  0.00640f, .tau_max = 48.0f}, // J1 DM6248P
+    {.direction =  1.0f, .q_offset =  -0.06200f, .tau_max = 48.0f}, // J2 DM6248P
+    {.direction =  1.0f, .q_offset =  -0.02500f, .tau_max = 12.5f}, // J3 DM4310P
+    {.direction =  1.0f, .q_offset =  -0.07300f, .tau_max = 28.0f}, // J4 DM4340P
+    {.direction =  1.0f, .q_offset =  -0.01100f, .tau_max = 12.5f}, // J5 DM4310
 };
 
 static DMMotorInstance *joint_motor[ARM_JOINT_NUM]; // 关节电机, 未注册的为NULL
-static ArmMpcTask arm_mpc;                          // 机械臂控制实例
+__attribute__((section(".dtcm"))) static ArmMpcTask arm_mpc; // 机械臂控制实例(仅CPU访问, 放DTCM零等待)
 
 static Publisher_t *gimbal_pub;                   // 机械臂状态发布者(反馈给cmd)
 static Subscriber_t *gimbal_sub;                  // cmd控制消息订阅者

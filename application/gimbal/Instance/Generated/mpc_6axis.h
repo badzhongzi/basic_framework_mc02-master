@@ -46,7 +46,7 @@ extern const float MPC_EFFORT_MAX[MPC_NJ];
  * 和实际下发的不是一个东西。 */
 extern const float MPC_FRIC_FC[MPC_NJ];
 extern const float MPC_FRIC_FV[MPC_NJ];
-#define MPC_FRIC_SCALE  8.00000000e-01f
+#define MPC_FRIC_SCALE  0.00000000e+00f
 #define MPC_FRIC_DQ_EPS 2.00000000e-02f
 
 /* 摩擦前馈：tau_out[j] = SCALE*(FC[j]*tanh(dq[j]/DQ_EPS) + FV[j]*dq[j])。
@@ -73,7 +73,7 @@ int mpc_saturate_total(const float *tau_ff, const float *dtau, float *tau_out);
  * 真正下发的修正量 Δτ = ρ(q)·u，ρ = M_eff(q)/MPC_M_DESIGN，
  * M_eff = 1/(M(q)^-1)_jj。这样闭环对 u 来说是线性定常的，QP 矩阵不用变。
  * MPC_USE_RHO = 0 时 ρ 恒为 1（旧行为）。 */
-#define MPC_USE_RHO  1
+#define MPC_USE_RHO  0
 extern const float MPC_M_DESIGN[MPC_NJ];
 extern const float MPC_RHO_MIN[MPC_NJ];
 extern const float MPC_RHO_MAX[MPC_NJ];
@@ -112,8 +112,8 @@ void  mpc_est_commit(int j, float u_applied);
 float mpc_est_w(int j);
 
 /* 锚点误差钳位上限（factor=3），由新求解器自己的无约束增益反推：
- * K_pos = [165.27, 292.22, 291.52,  27.2 , 158.5 ,  14.86]
- * K_vel = [ 6.02, 16.57, 14.12,  0.95,  5.75,  0.53]
+ * K_pos = [ 25.51, 119.  , 134.81,  14.93,  84.54,   8.2 ]
+ * K_vel = [5.35, 7.63, 7.9 , 0.58, 3.52, 0.32]
  * 只钳进代价的锚点，不钳进约束预测的锚点（约束要按真实状态预测位置）。
  * mpc_cs_step() 内部已自动钳位，调用方无需自己处理。 */
 extern const float MPC_E_MAX[MPC_NJ];
