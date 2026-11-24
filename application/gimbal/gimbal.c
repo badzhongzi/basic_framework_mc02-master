@@ -62,11 +62,11 @@ static const Arm_Joint_Motor_Config_s joint_motor_config[ARM_JOINT_NUM] = {
  */
 static const ArmMpcJointConfig joint_cfg[ARM_JOINT_NUM] = {
     {.direction = -1.0f, .q_offset =  0.00000f, .tau_max = 28.0f}, // J0 DM4340P
-    {.direction =  1.0f, .q_offset =  0.00000f, .tau_max = 48.0f}, // J1 DM6248P
-    {.direction =  1.0f, .q_offset =  0.00000f, .tau_max = 48.0f}, // J2 DM6248P
-    {.direction =  1.0f, .q_offset =  0.00000f, .tau_max = 12.5f}, // J3 DM4310P
-    {.direction =  1.0f, .q_offset =  0.00000f, .tau_max = 28.0f}, // J4 DM4340P
-    {.direction =  1.0f, .q_offset =  0.00000f, .tau_max = 12.5f}, // J5 DM4310
+    {.direction =  1.0f, .q_offset =  0.00640f, .tau_max = 48.0f}, // J1 DM6248P
+    {.direction =  1.0f, .q_offset =  -0.06200f, .tau_max = 48.0f}, // J2 DM6248P
+    {.direction =  1.0f, .q_offset =  -0.02500f, .tau_max = 12.5f}, // J3 DM4310P
+    {.direction =  1.0f, .q_offset =  -0.07300f, .tau_max = 28.0f}, // J4 DM4340P
+    {.direction =  1.0f, .q_offset =  -0.01100f, .tau_max = 12.5f}, // J5 DM4310
 };
 
 static DMMotorInstance *joint_motor[ARM_JOINT_NUM]; // 关节电机, 未注册的为NULL
